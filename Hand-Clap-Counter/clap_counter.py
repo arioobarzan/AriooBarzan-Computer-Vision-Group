@@ -1,10 +1,9 @@
 """
 Hand Clap Counter with MediaPipe
 =================================
-Detects hand claps in real-time using your webcam.
-Tracks both hands via MediaPipe Hand Landmarker (Tasks API)
-and counts a clap each time the wrists come close together.
-Displays a live counter overlay with visual feedback on every clap.
+Real-time hand-clap counter via webcam.
+Detects when both palms come together using multiple palm landmarks,
+then increments an on-screen counter with visual feedback.
 
 Press 'q' to quit.
 """
@@ -30,7 +29,6 @@ from common import (
 # ---------------------------------------------------------------------------
 clear_mediapipe_cache()
 suppress_gpu_warnings()
-
 MODEL_PATH = get_model_path()
 
 # ---------------------------------------------------------------------------
@@ -42,70 +40,47 @@ HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
 # ---------------------------------------------------------------------------
-# Hand skeleton connections for manual drawing
-# ---------------------------------------------------------------------------
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),           # Thumb
-    (5, 6), (6, 7), (7, 8),                    # Index
-    (9, 10), (10, 11), (11, 12),               # Middle
-    (13, 14), (14, 15), (15, 16),              # Ring
-    (17, 18), (18, 19), (19, 20),              # Pinky
-    (0, 5), (0, 17),                           # Wrist → index MCP, wrist → pinky MCP
-    (5, 9), (9, 13), (13, 17),                # Palm (MCP ring)
-]
-
-# Color palette
-LANDMARK_COLOR = (0, 255, 255)     # Yellow dots
-CONNECTION_COLOR = (200, 200, 200)  # Light grey lines
-
-# ---------------------------------------------------------------------------
 # Clap-detection parameters
 # ---------------------------------------------------------------------------
-CLAP_DISTANCE_THRESHOLD = 0.12   # normalized distance (0..1) — wrists closer = clap
-COOLDOWN_FRAMES = 25             # min frames between consecutive claps
-SEPARATION_FRAMES = 8            # hands must be apart this many frames before next clap
+# Landmarks that represent the palm surface (both sides should match)
+PALM_LANDMARKS = [0, 5, 9, 13, 17]  # wrist + index/middle/ring/pinky MCP
+
+CLAP_DISTANCE_THRESHOLD = 0.18  # avg normalised distance across palm landmarks
+COOLDOWN_FRAMES = 25            # min frames between consecutive claps
+SEPARATION_FRAMES = 8           # hands must be apart this many frames before next clap
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _wrist_distance(lm1, lm2) -> float:
-    """Normalised Euclidean distance between two wrist landmarks."""
-    return ((lm1.x - lm2.x) ** 2 + (lm1.y - lm2.y) ** 2) ** 0.5
-
-
-def _draw_hand_skeleton(frame, hand_landmarks, h: int, w: int) -> None:
-    """Draw hand landmarks and connections on the frame."""
-    points = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
-
-    # Connections
-    for a, b in HAND_CONNECTIONS:
-        cv2.line(frame, points[a], points[b], CONNECTION_COLOR, 1, cv2.LINE_AA)
-
-    # Landmark dots (smaller for fingertips, larger for palm)
-    for idx, (x, y) in enumerate(points):
-        radius = 2 if idx == 0 else 1
-        cv2.circle(frame, (x, y), radius, LANDMARK_COLOR, -1, cv2.LINE_AA)
+def _avg_palm_distance(lms1, lms2) -> float:
+    """Mean normalised distance between corresponding palm landmarks of two hands."""
+    total = 0.0
+    for idx in PALM_LANDMARKS:
+        dx = lms1[idx].x - lms2[idx].x
+        dy = lms1[idx].y - lms2[idx].y
+        total += (dx * dx + dy * dy) ** 0.5
+    return total / len(PALM_LANDMARKS)
 
 
 def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
               num_hands: int, cooldown_counter: int) -> None:
-    """Render the on-screen HUD: clap counter, status, flash, cooldown bar."""
+    """Render counter, flash effect, hand status, and cooldown bar."""
     h, w = frame.shape[:2]
 
-    # Dark transparent banner at the top
+    # Dark transparent banner
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, 120), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
-    # Counter label
+    # Label
     cv2.putText(frame, "Claps", (w // 2 - 62, 45),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2, cv2.LINE_AA)
-    # Counter value
+    # Counter
     cv2.putText(frame, str(clap_count), (w // 2 - 40, 95),
                 cv2.FONT_HERSHEY_DUPLEX, 3.5, (0, 255, 100), 5, cv2.LINE_AA)
 
-    # Green flash on clap
+    # Green flash
     if clap_this_frame:
         flash = frame.copy()
         cv2.rectangle(flash, (0, 0), (w, h), (0, 255, 0), -1)
@@ -113,12 +88,12 @@ def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
         cv2.putText(frame, "CLAP!", (w // 2 - 100, h // 2 + 20),
                     cv2.FONT_HERSHEY_DUPLEX, 3, (0, 255, 0), 4, cv2.LINE_AA)
 
-    # Hand-count status (bottom-left)
+    # Hand status
     status_color = (0, 255, 0) if num_hands == 2 else (0, 165, 255)
     cv2.putText(frame, f"Hands: {num_hands}/2", (20, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2, cv2.LINE_AA)
 
-    # Quit hint (bottom-right)
+    # Quit hint
     cv2.putText(frame, "Press Q to quit", (w - 240, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
 
@@ -141,7 +116,6 @@ def main() -> None:
         min_tracking_confidence=0.5,
     )
 
-    # Clap-detection state
     clap_count = 0
     cooldown_counter = 0
     separation_counter = 0
@@ -167,14 +141,13 @@ def main() -> None:
                 result = detector.detect_for_video(mp_image, frame_idx)
                 frame_idx += 1
 
-                h, w = frame.shape[:2]
                 clap_this_frame = False
 
-                # --- Detection logic (requires exactly 2 hands) ---
+                # --- Clap detection (requires exactly 2 hands) ---
                 if result.hand_landmarks and len(result.hand_landmarks) == 2:
-                    lm0 = result.hand_landmarks[0]
-                    lm1 = result.hand_landmarks[1]
-                    dist = _wrist_distance(lm0[0], lm1[0])   # landmark 0 = wrist
+                    lms0 = result.hand_landmarks[0]
+                    lms1 = result.hand_landmarks[1]
+                    dist = _avg_palm_distance(lms0, lms1)
 
                     if cooldown_counter > 0:
                         cooldown_counter -= 1
@@ -183,8 +156,6 @@ def main() -> None:
 
                     close = dist < CLAP_DISTANCE_THRESHOLD
 
-                    # A fresh clap: hands just became close, cooldown expired,
-                    # and hands were apart long enough
                     if (close and not hands_were_close
                             and cooldown_counter == 0
                             and separation_counter == 0):
@@ -192,18 +163,12 @@ def main() -> None:
                         clap_this_frame = True
                         cooldown_counter = COOLDOWN_FRAMES
 
-                    # Track separation — hands must move apart before next clap
                     if not close and separation_counter == 0:
                         separation_counter = SEPARATION_FRAMES
 
                     hands_were_close = close
 
-                # --- Draw hand skeletons ---
-                if result.hand_landmarks:
-                    for hand_lms in result.hand_landmarks:
-                        _draw_hand_skeleton(frame, hand_lms, h, w)
-
-                # --- HUD overlay ---
+                # --- HUD ---
                 num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
                 _draw_hud(frame, clap_count, clap_this_frame, num_hands, cooldown_counter)
 
