@@ -1,51 +1,80 @@
-# 🤖 Computer Vision Group
+# Computer Vision Group
 
-**گروه بینایی کامپیوتر** — مجموعه‌ای از پروژه‌های متن‌باز و کاربردی در حوزه پردازش تصویر، یادگیری عمیق و بینایی ماشین.
+**Open-source computer vision projects** — real-time hand tracking, gesture recognition, object detection, and more. Every project is self-contained, well-documented, and ready to run.
 
 ---
 
-## 🎯 درباره مخزن
-
-این مخزن میزبان پروژه‌های متنوعی در زمینه Computer Vision است؛ از ردیابی دست و ژست‌گیری با MediaPipe گرفته تا تشخیص اشیا، پردازش ویدئو و مدل‌های یادگیری عمیق. هدف ما پیاده‌سازی پروژه‌های واقعی، تمیز، خوش‌ساخت و آماده‌ی اجراست تا هم برای یادگیری مفید باشند و هم برای استفاده در پروژه‌های جدی.
-
-## 📁 ساختار مخزن
+## Repository Structure
 
 ```
 .
-├── Hand-Clap-Counter/       # شمارشگر دست زدن با MediaPipe
-├── (پروژه‌های آینده...)
+├── common/                   # Shared utilities (camera, drawing, MediaPipe helpers)
+├── HandTask/                 # Fingertip detection with gradient hand connections
+├── Hand-Clap-Counter/        # Real-time hand-clap counter via webcam
 └── README.md
 ```
 
-هر پروژه در پوشه‌ی جداگانه‌ای قرار دارد و شامل کد، requirements و راهنمای اجرای مختص به خودش است.
+Each project lives in its own folder with its own `README.md`, `requirements.txt`, and source code.
 
-## 🚀 پروژه‌ها
+## Projects
 
-| پروژه | توضیحات | تکنولوژی |
-|-------|---------|-----------|
-| [**Hand Clap Counter**](Hand-Clap-Counter/) | شمارشگر دست زدن در لحظه با وب‌کم | MediaPipe + OpenCV |
+| Project | Description | Tech |
+|---------|-------------|------|
+| [**HandTask**](HandTask/) | Detect 5 fingertips per hand. Connect matching fingers between two hands with glowing gradient lines. | MediaPipe Tasks API, OpenCV, NumPy |
+| [**Hand Clap Counter**](Hand-Clap-Counter/) | Count hand claps in real time via webcam. Live counter overlay with visual feedback. | MediaPipe Hands, OpenCV |
 
-## 🛠 نحوه اجرای پروژه‌ها
+## Shared Utilities (`common/`)
 
-۱. وارد پوشه پروژه مورد نظر شوید:
+| Module | Purpose |
+|--------|---------|
+| `camera.py` | `WebcamManager` — context-managed webcam capture with mirror flip |
+| `drawing.py` | `draw_gradient_line` — smooth glow-gradient line renderer |
+| `mediapipe_utils.py` | Cache clearing and GPU warning suppression for MediaPipe |
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.8+
+- A working webcam
+
+### Running a Project
+
 ```bash
-cd Project-Name
-```
-
-۲. وابستگی‌ها را نصب کنید:
-```bash
+cd <project-folder>
 pip install -r requirements.txt
+python <main-script>.py
 ```
 
-۳. اسکریپت اصلی را اجرا کنید:
+Press `q` to quit any running project.
+
+### HandTask — Additional Setup
+
+The HandTask project requires the MediaPipe Hand Landmarker model file. Download it into the project folder:
+
 ```bash
-python main.py
+# Windows (PowerShell)
+Invoke-WebRequest -Uri "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task" -OutFile "HandTask/hand_landmarker.task"
+
+# macOS / Linux
+wget -P HandTask/ https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
 ```
 
-## 🤝 مشارکت
+## Contributing
 
-این مخزن متن‌باز و پذیرای مشارکت و ایده‌های شماست! اگر پروژه‌ای در حوزه Computer Vision داری که دوست داری اینجا اضافه بشه، حتما Issue یا Pull Request بزن.
+This repository is open to contributions. If you have a computer vision project you would like to add:
+
+1. Create a new folder with your project name
+2. Include a `README.md`, `requirements.txt`, and your source code
+3. Use the shared `common/` utilities where applicable
+4. Open a Pull Request
+
+Keep all comments, docstrings, and documentation in English.
+
+## License
+
+MIT
 
 ---
 
-⭐ **Made with love for Computer Vision** 
+**Made for the Computer Vision community**
