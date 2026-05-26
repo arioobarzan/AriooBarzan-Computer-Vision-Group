@@ -16,7 +16,7 @@
 ├── Books/                     # (coming) Book notes, summaries, and references
 ├── Papers/                    # (coming) Paper reviews and implementations
 ├── README.md
-└── CLAUDE.md
+└── .gitignore
 ```
 
 ## Sample Codes
