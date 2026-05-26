@@ -2,8 +2,9 @@
 Hand Clap Counter with MediaPipe
 =================================
 Real-time hand-clap counter via webcam.
-Detects when both palms come together using multiple palm landmarks,
-then increments an on-screen counter with visual feedback.
+Tracks 6 corresponding point pairs (5 fingertips + palm center) between
+two hands. A clap is registered when at least 4 of the 6 pairs are closer
+than the threshold — meaning both palms and fingers meet.
 
 Press 'q' to quit.
 """
@@ -42,10 +43,11 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 # ---------------------------------------------------------------------------
 # Clap-detection parameters
 # ---------------------------------------------------------------------------
-# Landmarks that represent the palm surface (both sides should match)
-PALM_LANDMARKS = [0, 5, 9, 13, 17]  # wrist + index/middle/ring/pinky MCP
+# 6 corresponding point pairs: 5 fingertips + palm center (middle MCP)
+PAIR_LANDMARKS = [4, 8, 12, 16, 20, 9]   # thumb, index, middle, ring, pinky tips + palm
 
-CLAP_DISTANCE_THRESHOLD = 0.18  # avg normalised distance across palm landmarks
+PAIR_DISTANCE_THRESHOLD = 0.15  # normalised distance — a pair closer than this counts
+MIN_PAIRS_CLOSE = 4             # at least this many pairs must be close to register a clap
 COOLDOWN_FRAMES = 25            # min frames between consecutive claps
 SEPARATION_FRAMES = 8           # hands must be apart this many frames before next clap
 
@@ -53,14 +55,15 @@ SEPARATION_FRAMES = 8           # hands must be apart this many frames before ne
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _avg_palm_distance(lms1, lms2) -> float:
-    """Mean normalised distance between corresponding palm landmarks of two hands."""
-    total = 0.0
-    for idx in PALM_LANDMARKS:
+def _count_close_pairs(lms1, lms2) -> int:
+    """Return how many of the PAIR_LANDMARKS point-pairs are closer than threshold."""
+    close = 0
+    for idx in PAIR_LANDMARKS:
         dx = lms1[idx].x - lms2[idx].x
         dy = lms1[idx].y - lms2[idx].y
-        total += (dx * dx + dy * dy) ** 0.5
-    return total / len(PALM_LANDMARKS)
+        if (dx * dx + dy * dy) ** 0.5 < PAIR_DISTANCE_THRESHOLD:
+            close += 1
+    return close
 
 
 def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
@@ -124,7 +127,7 @@ def main() -> None:
     print(f"Model: {MODEL_PATH}")
     print("=" * 50)
     print("Hand Clap Counter — MediaPipe")
-    print("Clap your hands in front of the webcam.")
+    print(f"Tracking {len(PAIR_LANDMARKS)} point pairs, need {MIN_PAIRS_CLOSE}+ close to count.")
     print("Press 'q' to quit.")
     print("=" * 50)
 
@@ -147,14 +150,14 @@ def main() -> None:
                 if result.hand_landmarks and len(result.hand_landmarks) == 2:
                     lms0 = result.hand_landmarks[0]
                     lms1 = result.hand_landmarks[1]
-                    dist = _avg_palm_distance(lms0, lms1)
+                    close_pairs = _count_close_pairs(lms0, lms1)
 
                     if cooldown_counter > 0:
                         cooldown_counter -= 1
                     if separation_counter > 0:
                         separation_counter -= 1
 
-                    close = dist < CLAP_DISTANCE_THRESHOLD
+                    close = close_pairs >= MIN_PAIRS_CLOSE
 
                     if (close and not hands_were_close
                             and cooldown_counter == 0
