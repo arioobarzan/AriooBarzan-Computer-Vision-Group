@@ -16,6 +16,7 @@ Press 'q' to quit.
 
 import os
 import sys
+import time
 
 import cv2
 import mediapipe as mp
@@ -62,10 +63,9 @@ PAIR_INDICES = [p[0] for p in PAIRS]
 # ---------------------------------------------------------------------------
 # Clap-detection parameters
 # ---------------------------------------------------------------------------
-PAIR_DISTANCE_THRESHOLD = 0.15  # normalised distance — a pair closer than this counts
+PAIR_DISTANCE_THRESHOLD = 0.10  # normalised distance — a pair closer than this counts
 MIN_PAIRS_CLOSE = 4             # at least this many pairs must be close to register a clap
-COOLDOWN_FRAMES = 25
-SEPARATION_FRAMES = 8
+COOLDOWN_MS = 500               # min milliseconds between consecutive claps
 
 # ---------------------------------------------------------------------------
 # Drawing helpers
@@ -117,7 +117,7 @@ def _draw_single_hand_dots(frame, lms, h: int, w: int) -> None:
 
 
 def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
-              num_hands: int, close_pairs: int, cooldown_counter: int) -> None:
+              num_hands: int, close_pairs: int, cooldown_remaining_ms: float) -> None:
     """Render counter, flash, status, and cooldown bar."""
     h, w = frame.shape[:2]
 
@@ -155,9 +155,9 @@ def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
     cv2.putText(frame, "Press Q to quit", (w - 240, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
 
-    # Cooldown bar
-    if cooldown_counter > 0:
-        bar_w = int(200 * cooldown_counter / COOLDOWN_FRAMES)
+    # Cooldown bar (time-based)
+    if cooldown_remaining_ms > 0:
+        bar_w = int(200 * cooldown_remaining_ms / COOLDOWN_MS)
         cv2.rectangle(frame, (w - 220, h - 45), (w - 220 + bar_w, h - 33), (255, 140, 0), -1)
 
 
@@ -175,14 +175,14 @@ def main() -> None:
     )
 
     clap_count = 0
-    cooldown_counter = 0
-    separation_counter = 0
+    last_clap_time = 0.0
     hands_were_close = False
 
     print(f"Model: {MODEL_PATH}")
     print("=" * 50)
     print("Hand Clap Counter — MediaPipe")
     print(f"Tracking {len(PAIRS)} point pairs, need {MIN_PAIRS_CLOSE}+ close to count.")
+    print(f"Threshold: {PAIR_DISTANCE_THRESHOLD}, cooldown: {COOLDOWN_MS}ms")
     print("Press 'q' to quit.")
     print("=" * 50)
 
@@ -194,6 +194,7 @@ def main() -> None:
                 if not success:
                     break
 
+                now = time.time()
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result = detector.detect_for_video(mp_image, frame_idx)
@@ -220,23 +221,14 @@ def main() -> None:
                     # Draw coloured points and connecting lines
                     _draw_pairs(frame, lms0, lms1, pair_distances, h, w)
 
-                    # Cooldown / separation counters
-                    if cooldown_counter > 0:
-                        cooldown_counter -= 1
-                    if separation_counter > 0:
-                        separation_counter -= 1
-
+                    elapsed_ms = (now - last_clap_time) * 1000
                     close = close_pairs >= MIN_PAIRS_CLOSE
 
                     if (close and not hands_were_close
-                            and cooldown_counter == 0
-                            and separation_counter == 0):
+                            and elapsed_ms >= COOLDOWN_MS):
                         clap_count += 1
                         clap_this_frame = True
-                        cooldown_counter = COOLDOWN_FRAMES
-
-                    if not close and separation_counter == 0:
-                        separation_counter = SEPARATION_FRAMES
+                        last_clap_time = now
 
                     hands_were_close = close
 
@@ -246,7 +238,8 @@ def main() -> None:
 
                 # --- HUD ---
                 num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
-                _draw_hud(frame, clap_count, clap_this_frame, num_hands, close_pairs, cooldown_counter)
+                cooldown_remaining_ms = max(0.0, COOLDOWN_MS - (now - last_clap_time) * 1000)
+                _draw_hud(frame, clap_count, clap_this_frame, num_hands, close_pairs, cooldown_remaining_ms)
 
                 cv2.imshow("Hand Clap Counter", frame)
 
