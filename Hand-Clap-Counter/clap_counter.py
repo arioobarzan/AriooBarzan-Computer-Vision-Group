@@ -2,9 +2,14 @@
 Hand Clap Counter with MediaPipe
 =================================
 Real-time hand-clap counter via webcam.
-Tracks 6 corresponding point pairs (5 fingertips + palm center) between
-two hands. A clap is registered when at least 4 of the 6 pairs are closer
-than the threshold — meaning both palms and fingers meet.
+
+Visualisation:
+  - 5 fingertip pairs + palm-centre pair, each pair its own colour
+  - Lines connecting corresponding points between the two hands
+  - Normalised distance drawn on every connecting line
+
+Detection:
+  - A clap is registered when >= 4 of the 6 pairs are closer than the threshold.
 
 Press 'q' to quit.
 """
@@ -41,34 +46,79 @@ HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
 # ---------------------------------------------------------------------------
+# Point-pair definitions
+#   (landmark_idx, label, BGR colour)
+# ---------------------------------------------------------------------------
+PAIRS = [
+    (4,  "Thumb",  (255, 0, 0)),      # Blue
+    (8,  "Index",  (0, 255, 0)),      # Green
+    (12, "Middle", (0, 0, 255)),      # Red
+    (16, "Ring",   (255, 255, 0)),    # Cyan
+    (20, "Pinky",  (255, 0, 255)),    # Magenta
+    (9,  "Palm",   (0, 210, 255)),    # Gold
+]
+PAIR_INDICES = [p[0] for p in PAIRS]
+
+# ---------------------------------------------------------------------------
 # Clap-detection parameters
 # ---------------------------------------------------------------------------
-# 6 corresponding point pairs: 5 fingertips + palm center (middle MCP)
-PAIR_LANDMARKS = [4, 8, 12, 16, 20, 9]   # thumb, index, middle, ring, pinky tips + palm
-
 PAIR_DISTANCE_THRESHOLD = 0.15  # normalised distance — a pair closer than this counts
 MIN_PAIRS_CLOSE = 4             # at least this many pairs must be close to register a clap
-COOLDOWN_FRAMES = 25            # min frames between consecutive claps
-SEPARATION_FRAMES = 8           # hands must be apart this many frames before next clap
-
+COOLDOWN_FRAMES = 25
+SEPARATION_FRAMES = 8
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Drawing helpers
 # ---------------------------------------------------------------------------
-def _count_close_pairs(lms1, lms2) -> int:
-    """Return how many of the PAIR_LANDMARKS point-pairs are closer than threshold."""
-    close = 0
-    for idx in PAIR_LANDMARKS:
-        dx = lms1[idx].x - lms2[idx].x
-        dy = lms1[idx].y - lms2[idx].y
-        if (dx * dx + dy * dy) ** 0.5 < PAIR_DISTANCE_THRESHOLD:
-            close += 1
-    return close
+def _landmark_to_px(lm, w: int, h: int) -> tuple[int, int]:
+    return int(lm.x * w), int(lm.y * h)
+
+
+def _draw_pairs(frame, lms0, lms1, pair_distances, h: int, w: int) -> None:
+    """Draw coloured circles, connecting lines, and distance labels for every pair."""
+    for i, (lm_idx, label, color) in enumerate(PAIRS):
+        p0 = _landmark_to_px(lms0[lm_idx], w, h)
+        p1 = _landmark_to_px(lms1[lm_idx], w, h)
+        norm_dist = pair_distances[i]
+
+        # Connecting line (dashed-thin when far, solid-thick when close)
+        close = norm_dist < PAIR_DISTANCE_THRESHOLD
+        thickness = 3 if close else 1
+        cv2.line(frame, p0, p1, color, thickness, cv2.LINE_AA)
+
+        # Circles on both hands
+        cv2.circle(frame, p0, 10, color, -1, cv2.LINE_AA)
+        cv2.circle(frame, p0, 10, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(frame, p1, 10, color, -1, cv2.LINE_AA)
+        cv2.circle(frame, p1, 10, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Distance label at midpoint
+        mx, my = (p0[0] + p1[0]) // 2, (p0[1] + p1[1]) // 2
+        text = f"{norm_dist:.3f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.55
+        (tw, th), _ = cv2.getTextSize(text, font, font_scale, 2)
+
+        # Dark background pill behind text
+        cv2.rectangle(frame,
+                      (mx - tw // 2 - 6, my - th // 2 - 4),
+                      (mx + tw // 2 + 6, my + th // 2 + 4),
+                      (30, 30, 30), -1)
+        cv2.putText(frame, text, (mx - tw // 2, my + th // 2),
+                    font, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def _draw_single_hand_dots(frame, lms, h: int, w: int) -> None:
+    """When only one hand is visible, draw its pair-points without lines."""
+    for lm_idx, _label, color in PAIRS:
+        p = _landmark_to_px(lms[lm_idx], w, h)
+        cv2.circle(frame, p, 10, color, -1, cv2.LINE_AA)
+        cv2.circle(frame, p, 10, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
-              num_hands: int, cooldown_counter: int) -> None:
-    """Render counter, flash effect, hand status, and cooldown bar."""
+              num_hands: int, close_pairs: int, cooldown_counter: int) -> None:
+    """Render counter, flash, status, and cooldown bar."""
     h, w = frame.shape[:2]
 
     # Dark transparent banner
@@ -77,11 +127,11 @@ def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
     # Label
-    cv2.putText(frame, "Claps", (w // 2 - 62, 45),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2, cv2.LINE_AA)
+    cv2.putText(frame, "Claps", (w // 2 - 62, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (200, 200, 200), 2, cv2.LINE_AA)
     # Counter
-    cv2.putText(frame, str(clap_count), (w // 2 - 40, 95),
-                cv2.FONT_HERSHEY_DUPLEX, 3.5, (0, 255, 100), 5, cv2.LINE_AA)
+    cv2.putText(frame, str(clap_count), (w // 2 - 40, 90),
+                cv2.FONT_HERSHEY_DUPLEX, 3.2, (0, 255, 100), 5, cv2.LINE_AA)
 
     # Green flash
     if clap_this_frame:
@@ -91,19 +141,24 @@ def _draw_hud(frame, clap_count: int, clap_this_frame: bool,
         cv2.putText(frame, "CLAP!", (w // 2 - 100, h // 2 + 20),
                     cv2.FONT_HERSHEY_DUPLEX, 3, (0, 255, 0), 4, cv2.LINE_AA)
 
-    # Hand status
+    # Hand status (bottom-left)
     status_color = (0, 255, 0) if num_hands == 2 else (0, 165, 255)
     cv2.putText(frame, f"Hands: {num_hands}/2", (20, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2, cv2.LINE_AA)
 
-    # Quit hint
+    # Close-pairs indicator (bottom-centre-left)
+    pairs_color = (0, 255, 0) if close_pairs >= MIN_PAIRS_CLOSE else (180, 180, 180)
+    cv2.putText(frame, f"Pairs close: {close_pairs}/{len(PAIRS)}  (need {MIN_PAIRS_CLOSE})",
+                (20, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, pairs_color, 1, cv2.LINE_AA)
+
+    # Quit hint (bottom-right)
     cv2.putText(frame, "Press Q to quit", (w - 240, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
 
     # Cooldown bar
     if cooldown_counter > 0:
         bar_w = int(200 * cooldown_counter / COOLDOWN_FRAMES)
-        cv2.rectangle(frame, (20, h - 50), (20 + bar_w, h - 38), (255, 140, 0), -1)
+        cv2.rectangle(frame, (w - 220, h - 45), (w - 220 + bar_w, h - 33), (255, 140, 0), -1)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +182,7 @@ def main() -> None:
     print(f"Model: {MODEL_PATH}")
     print("=" * 50)
     print("Hand Clap Counter — MediaPipe")
-    print(f"Tracking {len(PAIR_LANDMARKS)} point pairs, need {MIN_PAIRS_CLOSE}+ close to count.")
+    print(f"Tracking {len(PAIRS)} point pairs, need {MIN_PAIRS_CLOSE}+ close to count.")
     print("Press 'q' to quit.")
     print("=" * 50)
 
@@ -144,14 +199,28 @@ def main() -> None:
                 result = detector.detect_for_video(mp_image, frame_idx)
                 frame_idx += 1
 
+                h, w = frame.shape[:2]
                 clap_this_frame = False
+                close_pairs = 0
 
-                # --- Clap detection (requires exactly 2 hands) ---
+                # --- Clap detection & visualisation (requires 2 hands) ---
                 if result.hand_landmarks and len(result.hand_landmarks) == 2:
                     lms0 = result.hand_landmarks[0]
                     lms1 = result.hand_landmarks[1]
-                    close_pairs = _count_close_pairs(lms0, lms1)
 
+                    # Compute normalised distance for every pair
+                    pair_distances = []
+                    for lm_idx in PAIR_INDICES:
+                        dx = lms0[lm_idx].x - lms1[lm_idx].x
+                        dy = lms0[lm_idx].y - lms1[lm_idx].y
+                        pair_distances.append((dx * dx + dy * dy) ** 0.5)
+
+                    close_pairs = sum(1 for d in pair_distances if d < PAIR_DISTANCE_THRESHOLD)
+
+                    # Draw coloured points and connecting lines
+                    _draw_pairs(frame, lms0, lms1, pair_distances, h, w)
+
+                    # Cooldown / separation counters
                     if cooldown_counter > 0:
                         cooldown_counter -= 1
                     if separation_counter > 0:
@@ -171,9 +240,13 @@ def main() -> None:
 
                     hands_were_close = close
 
+                elif result.hand_landmarks and len(result.hand_landmarks) == 1:
+                    # Single hand: draw dots only, no lines
+                    _draw_single_hand_dots(frame, result.hand_landmarks[0], h, w)
+
                 # --- HUD ---
                 num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
-                _draw_hud(frame, clap_count, clap_this_frame, num_hands, cooldown_counter)
+                _draw_hud(frame, clap_count, clap_this_frame, num_hands, close_pairs, cooldown_counter)
 
                 cv2.imshow("Hand Clap Counter", frame)
 
