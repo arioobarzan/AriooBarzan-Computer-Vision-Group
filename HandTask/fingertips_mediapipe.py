@@ -27,25 +27,23 @@ import numpy as np
 # Allow importing from the repo root (common/ package)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common import WebcamManager, clear_mediapipe_cache, draw_gradient_line, suppress_gpu_warnings
+from common import (
+    WebcamManager,
+    clear_mediapipe_cache,
+    draw_gradient_line,
+    get_model_path,
+    suppress_gpu_warnings,
+)
 
 # ---------------------------------------------------------------------------
 # Environment setup
 # ---------------------------------------------------------------------------
 clear_mediapipe_cache()
 suppress_gpu_warnings()
+
+MODEL_PATH = get_model_path()
+print(f"Model: {MODEL_PATH}")
 print("Ready.\n")
-
-# ---------------------------------------------------------------------------
-# Model path
-# ---------------------------------------------------------------------------
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
-
-if not os.path.exists(MODEL_PATH):
-    print(f"ERROR: Model file not found at:\n  {MODEL_PATH}")
-    print("Download from:")
-    print("  https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task")
-    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # MediaPipe setup

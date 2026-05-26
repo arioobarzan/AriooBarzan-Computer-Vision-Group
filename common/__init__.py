@@ -9,11 +9,18 @@ Provides:
 
 from .camera import WebcamManager
 from .drawing import draw_gradient_line
-from .mediapipe_utils import clear_mediapipe_cache, suppress_gpu_warnings
+from .mediapipe_utils import (
+    MODEL_FILENAME,
+    clear_mediapipe_cache,
+    get_model_path,
+    suppress_gpu_warnings,
+)
 
 __all__ = [
     "WebcamManager",
     "draw_gradient_line",
     "clear_mediapipe_cache",
+    "get_model_path",
+    "MODEL_FILENAME",
     "suppress_gpu_warnings",
 ]
