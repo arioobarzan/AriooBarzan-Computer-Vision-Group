@@ -8,16 +8,21 @@
 
 ## Project Conventions
 
-- Every project folder contains:
+- Every project folder under `Sample Codes/` contains:
   - A `README.md` explaining the project, how to run it, and how it works.
   - A `requirements.txt` listing dependencies with minimum versions.
-- Shared reusable code belongs in the `common/` package at the repo root.
-- Import from `common/` by adding the repo root to `sys.path`:
+- Shared reusable code belongs in `Sample Codes/common/`.
+- Import from `common/` by adding `Sample Codes/` to `sys.path`:
   ```python
   import os, sys
   sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
   from common import WebcamManager
   ```
+- The repo is organised into top-level sections:
+  - `Sample Codes/` — ready-to-run projects
+  - `Articles/` — blog posts and tutorials (future)
+  - `Books/` — book notes and summaries (future)
+  - `Papers/` — paper reviews and implementations (future)
 
 ## Auto-Commit & Push Skill
 
@@ -29,10 +34,10 @@
    - Example: `feat: add Hand Clap Counter project with MediaPipe clap detection`
 3. **Push** to the remote: `git push`.
 4. **Update the root `README.md`** if any of the following changed:
-   - A new project folder was added or removed.
+   - A new project or top-level section was added or removed.
    - A project's description or tech stack changed.
    - The repository structure changed.
-   - New shared utilities were added to `common/`.
-   - Update the **Projects** table and **Shared Utilities** table accordingly.
+   - New shared utilities were added to `Sample Codes/common/`.
+   - Update the **Sample Codes** table and **Shared Utilities** table accordingly.
 
 Never leave uncommitted changes sitting in the working tree after completing a task.
