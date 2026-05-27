@@ -5,7 +5,8 @@ MediaPipe helper utilities.
 import os
 import shutil
 
-MODEL_FILENAME = "hand_landmarker.task"
+HAND_MODEL_FILENAME = "hand_landmarker.task"
+POSE_MODEL_FILENAME = "pose_landmarker.task"
 
 
 def clear_mediapipe_cache() -> None:
@@ -23,12 +24,13 @@ def suppress_gpu_warnings() -> None:
     os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
 
 
-def get_model_path() -> str:
+def get_model_path(filename: str = HAND_MODEL_FILENAME) -> str:
     """
-    Resolve the path to the hand_landmarker.task model file.
+    Resolve the path to a MediaPipe model file.
 
-    Looks first in ``common/models/`` at the repo root, then falls back
-    to the caller's directory.
+    Looks first in ``common/models/``, then falls back to the caller's
+    directory.  Pass ``filename`` to request a non-default model
+    (e.g. ``POSE_MODEL_FILENAME``).
 
     Returns:
         Absolute path to the model file.
@@ -36,26 +38,23 @@ def get_model_path() -> str:
     Raises:
         FileNotFoundError: if the model file cannot be found.
     """
-    # Repo root = two levels up from this file (common/mediapipe_utils.py)
+    # Repo root = two levels up from this file (Sample Codes/common/mediapipe_utils.py)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    shared = os.path.join(repo_root, "common", "models", MODEL_FILENAME)
+    shared = os.path.join(repo_root, "common", "models", filename)
     if os.path.exists(shared):
         return shared
 
     # Fallback: caller's directory
     import inspect
-    caller_file = inspect.currentframe()
-    if caller_file is not None and caller_file.f_back is not None:
-        caller_dir = os.path.dirname(os.path.abspath(caller_file.f_back.f_code.co_filename))
-        local = os.path.join(caller_dir, MODEL_FILENAME)
+    caller_frame = inspect.currentframe()
+    if caller_frame is not None and caller_frame.f_back is not None:
+        caller_dir = os.path.dirname(os.path.abspath(caller_frame.f_back.f_code.co_filename))
+        local = os.path.join(caller_dir, filename)
         if os.path.exists(local):
             return local
 
     raise FileNotFoundError(
-        f"Model file '{MODEL_FILENAME}' not found in:\n"
+        f"Model file '{filename}' not found in:\n"
         f"  {shared}\n"
-        "Download from:\n"
-        "  https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
-        "hand_landmarker/float16/latest/hand_landmarker.task\n"
-        f"and place it in common/models/"
+        "Please download it and place it in common/models/."
     )

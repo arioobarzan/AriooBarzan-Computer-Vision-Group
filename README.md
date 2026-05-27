@@ -11,7 +11,8 @@
 ├── Sample Codes/              # Ready-to-run CV projects
 │   ├── common/                #   Shared utilities (camera, drawing, MediaPipe helpers)
 │   ├── HandTask/              #   Fingertip detection with gradient hand connections
-│   └── Hand-Clap-Counter/     #   Real-time hand-clap counter via webcam
+│   ├── Hand-Clap-Counter/     #   Real-time hand-clap counter via webcam
+│   └── Anti-Slouch-Alarm/     #   Posture monitor with slouch alarm
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
 ├── Books/                     # (coming) Book notes, summaries, and references
 ├── Papers/                    # (coming) Paper reviews and implementations
@@ -27,6 +28,7 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 |---------|-------------|------|
 | [**HandTask**](Sample%20Codes/HandTask/) | Detect 5 fingertips per hand. Connect matching fingers between two hands with glowing gradient lines. | MediaPipe Tasks API, OpenCV, NumPy |
 | [**Hand Clap Counter**](Sample%20Codes/Hand-Clap-Counter/) | Count hand claps in real time via webcam. Live counter overlay with visual feedback. | MediaPipe Hands, OpenCV |
+| [**Anti-Slouch Alarm**](Sample%20Codes/Anti-Slouch-Alarm/) | Real-time posture monitor. Calibrate your upright posture, get alerted when you slouch or lean too close to the screen. | MediaPipe Pose, OpenCV |
 
 ### Shared Utilities (`Sample Codes/common/`)
 
@@ -53,16 +55,24 @@ python <main-script>.py
 
 Press `q` to quit any running project.
 
-### Model File
+### Model Files
 
-Projects using the MediaPipe Hand Landmarker need the model file. It is already included at `Sample Codes/common/models/hand_landmarker.task`. To download it manually:
+Projects using MediaPipe Landmarkers need model files in `Sample Codes/common/models/`.
+
+| Model | File | Status |
+|-------|------|--------|
+| Hand Landmarker | `hand_landmarker.task` | Included |
+| Pose Landmarker | `pose_landmarker.task` | Download below |
+
+**Download Pose Landmarker (required for Anti-Slouch Alarm):**
 
 ```bash
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task" -OutFile "Sample Codes/common/models/hand_landmarker.task"
+Invoke-WebRequest -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task" -OutFile "Sample Codes/common/models/pose_landmarker.task"
 
 # macOS / Linux
-wget -P "Sample Codes/common/models/" https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+wget -O "Sample Codes/common/models/pose_landmarker.task" \
+  https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
 ```
 
 ## Contributing
