@@ -66,32 +66,28 @@ _IS_WINDOWS = platform.system() == "Windows"
 # Audio player (zero external dependencies)
 # ---------------------------------------------------------------------------
 class _Sound:
-    """A playable sound backed by in-memory WAV bytes."""
+    """A playable sound that writes WAV bytes to a temp file for playback."""
 
     def __init__(self, wav_bytes: bytes) -> None:
-        self._data = wav_bytes
-        if not _IS_WINDOWS:
-            # Write to a temp file so afplay / aplay can read it
-            self._tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            self._tmp.write(wav_bytes)
-            self._tmp.close()
-            self._path = self._tmp.name
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        self._tmp.write(wav_bytes)
+        self._tmp.close()
+        self._path = self._tmp.name
 
     def play(self) -> None:
         """Play the sound asynchronously."""
         if _IS_WINDOWS:
             import winsound
-            winsound.PlaySound(self._data, winsound.SND_MEMORY | winsound.SND_ASYNC)
+            winsound.PlaySound(self._path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         else:
             cmd = ["afplay", self._path] if platform.system() == "Darwin" else ["aplay", "-q", self._path]
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def __del__(self) -> None:
-        if not _IS_WINDOWS and hasattr(self, "_path"):
-            try:
-                os.unlink(self._path)
-            except OSError:
-                pass
+        try:
+            os.unlink(self._path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
