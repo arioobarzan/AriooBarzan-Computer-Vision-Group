@@ -4,6 +4,8 @@ Real-time fingertip detection using MediaPipe Hand Landmarker. Detects 5 fingert
 
 ## Demo
 
+[![HandTask Demo](https://img.youtube.com/vi/TezkHG0_X_E/maxresdefault.jpg)](https://www.youtube.com/shorts/TezkHG0_X_E)
+
 - 5 colored circles on each fingertip (thumb, index, middle, ring, pinky)
 - Gradient lines connecting matching fingertips between two hands
 - Smooth glow effect: thick & bright center, thin & saturated ends

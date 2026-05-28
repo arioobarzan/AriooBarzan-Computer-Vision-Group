@@ -7,6 +7,10 @@ script continuously tracks shoulder position, head posture, and screen
 proximity. If you slouch, lean forward, or get too close to the monitor for
 more than 3 seconds, a red warning overlay appears and an audible beep plays.
 
+## Demo
+
+[![Anti-Slouch Alarm Demo](https://img.youtube.com/vi/66qplDZo6a0/maxresdefault.jpg)](https://www.youtube.com/watch?v=66qplDZo6a0)
+
 ## How It Works
 
 | Metric | What It Tracks | Bad Posture Sign |

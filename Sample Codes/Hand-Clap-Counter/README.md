@@ -4,9 +4,10 @@ Real-time hand-clap counter using your webcam and MediaPipe. Detects both hands,
 
 ## Demo
 
+[![Hand Clap Counter Demo](https://img.youtube.com/vi/XfMXq6csxyQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=XfMXq6csxyQ)
+
 - Live clap counter with large on-screen number
 - Green flash effect on every detected clap
-- Full hand-skeleton overlay for visual feedback
 - Cooldown bar to prevent double-counting
 - Hand-count indicator (shows how many hands are visible)
 

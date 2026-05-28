@@ -7,6 +7,10 @@ index finger to trigger the corresponding sound.
 Synthesised placeholder sounds are built in — just run and play. Drop
 real `.wav` files into the project folder to replace them.
 
+## Demo
+
+[![Virtual Drum Kit Demo](https://img.youtube.com/vi/XSfJnJYS4mE/maxresdefault.jpg)](https://www.youtube.com/watch?v=XSfJnJYS4mE)
+
 ## Drum Pads
 
 | Pad | Colour | Default Sound |
