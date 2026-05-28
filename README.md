@@ -30,7 +30,7 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 | [**HandTask**](Sample%20Codes/HandTask/) | Detect 5 fingertips per hand. Connect matching fingers between two hands with glowing gradient lines. | MediaPipe Tasks API, OpenCV, NumPy |
 | [**Hand Clap Counter**](Sample%20Codes/Hand-Clap-Counter/) | Count hand claps in real time via webcam. Live counter overlay with visual feedback. | MediaPipe Hands, OpenCV |
 | [**Anti-Slouch Alarm**](Sample%20Codes/Anti-Slouch-Alarm/) | Real-time posture monitor. Calibrate your upright posture, get alerted when you slouch or lean too close to the screen. | MediaPipe Pose, OpenCV |
-| [**Virtual Drum Kit**](Sample%20Codes/Virtual-Drum-Kit/) | Play drums in the air. Tap circular pads with your index fingers to trigger sounds. Built-in synth sounds + support for custom WAV files. | MediaPipe Hands, Pygame, OpenCV |
+| [**Virtual Drum Kit**](Sample%20Codes/Virtual-Drum-Kit/) | Play drums in the air. Tap circular pads with your index fingers to trigger sounds. Built-in synth sounds + support for custom WAV files. | MediaPipe Hands, OpenCV |
 
 ### Shared Utilities (`Sample Codes/common/`)
 
