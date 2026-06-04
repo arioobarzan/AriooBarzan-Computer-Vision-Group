@@ -5,7 +5,7 @@ Control your system master volume by moving your hands apart or together.
 
 - Move hands **apart**  -> volume **up**   (100 %)
 - Move hands **close**   -> volume **down**  (0 %)
-- Press **'c'** to calibrate (hands wide = max volume).
+- Fixed thresholds: index tips < 0.1 apart = mute, > 0.5 apart = max volume.
 - Press **'q'** to quit.
 
 Uses MediaPipe Hands (Tasks API) for hand tracking and the native Windows
@@ -164,8 +164,8 @@ class DualHandVolumeController:
     system master volume.
 
     Attributes:
-        calib_max_dist: Calibrated maximum distance (100 % volume).
-        calib_min_dist: Minimum distance floor (0 % volume), ~0.03.
+        min_dist: Distance below which volume = 0 % (default 0.10).
+        max_dist: Distance above which volume = 100 % (default 0.50).
         volume_smooth: ``deque`` buffer for temporal smoothing.
         volume_pct: Current smoothed volume percentage.
     """
@@ -181,10 +181,9 @@ class DualHandVolumeController:
         )
         self._detector = HandLandmarker.create_from_options(options)
 
-        # Calibration
-        self.calib_max_dist: float = 0.60   # default (updated on 'c')
-        self.calib_min_dist: float = 0.03   # hands nearly touching
-        self._calibrated = False
+        # Fixed distance thresholds (no calibration needed)
+        self.min_dist: float = 0.10   # index fingertips nearly touching = 0% volume
+        self.max_dist: float = 0.50   # index fingertips wide apart = 100% volume
 
         # Smoothing -- moving average over last N raw values
         self._smooth_window = 8
@@ -219,10 +218,12 @@ class DualHandVolumeController:
             pass
 
     # ── hand geometry ─────────────────────────────────────────────
+    FINGERTIP_IDX = 8  # index-finger tip landmark
+
     @staticmethod
-    def _hand_center(landmarks, w: int, h: int) -> tuple[float, float]:
-        """Return pixel (x, y) of the wrist (landmark 0) as hand centre."""
-        lm = landmarks[0]
+    def _fingertip(landmarks, w: int, h: int) -> tuple[float, float]:
+        """Return pixel (x, y) of the index-finger tip (landmark 8)."""
+        lm = landmarks[DualHandVolumeController.FINGERTIP_IDX]
         return lm.x * w, lm.y * h
 
     @staticmethod
@@ -232,10 +233,11 @@ class DualHandVolumeController:
 
     # ── volume mapping ────────────────────────────────────────────
     def _distance_to_volume(self, dist_norm: float) -> float:
-        """Map normalised hand distance to volume percentage [0, 100]."""
-        clamped = max(self.calib_min_dist, min(dist_norm, self.calib_max_dist))
-        fraction = ((clamped - self.calib_min_dist)
-                    / (self.calib_max_dist - self.calib_min_dist))
+        """Map normalised fingertip distance linearly to volume [0, 100].
+        < 0.1 = 0%  |  0.5 = 100%  |  > 0.5 = 100% (clamped)."""
+        clamped = max(self.min_dist, min(dist_norm, self.max_dist))
+        fraction = ((clamped - self.min_dist)
+                    / (self.max_dist - self.min_dist))
         return fraction * 100.0
 
     def _apply_smoothing(self, raw_vol: float) -> float:
@@ -307,10 +309,7 @@ class DualHandVolumeController:
         cv2.rectangle(overlay, (0, 0), (w, 72), DARK, -1)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
-        if not self._calibrated:
-            status = ("NOT CALIBRATED -- spread hands wide, press 'c'")
-            status_color = (0, 165, 255)
-        elif self._hands_visible != 2:
+        if self._hands_visible != 2:
             status = f"Waiting for 2 hands...  (visible: {self._hands_visible})"
             status_color = (0, 165, 255)
         else:
@@ -322,7 +321,7 @@ class DualHandVolumeController:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_color, 2, cv2.LINE_AA)
 
         # ── Keybinding hints (bottom) ──
-        hints = "Q = quit   |   C = calibrate max distance"
+        hints = "Q = quit"
         if not _VOLUME_AVAILABLE:
             hints += "   |   (visual-only mode -- audio API unavailable)"
         cv2.putText(frame, hints,
@@ -389,8 +388,8 @@ class DualHandVolumeController:
             lms0 = result.hand_landmarks[0]
             lms1 = result.hand_landmarks[1]
 
-            c0 = self._hand_center(lms0, w, h)
-            c1 = self._hand_center(lms1, w, h)
+            c0 = self._fingertip(lms0, w, h)
+            c1 = self._fingertip(lms1, w, h)
             self._center0 = c0
             self._center1 = c1
 
@@ -398,34 +397,21 @@ class DualHandVolumeController:
             diag = np.hypot(w, h)
             self._distance = self._distance_px(c0, c1) / diag
 
-            if self._calibrated:
-                raw = self._distance_to_volume(self._distance)
-                self._raw_vol = raw
-                self.volume_pct = self._apply_smoothing(raw)
-                _set_system_volume_scalar(self.volume_pct / 100.0)
+            raw = self._distance_to_volume(self._distance)
+            self._raw_vol = raw
+            self.volume_pct = self._apply_smoothing(raw)
+            _set_system_volume_scalar(self.volume_pct / 100.0)
         else:
             self._center0 = None
             self._center1 = None
 
             if result.hand_landmarks and len(result.hand_landmarks) == 1:
                 lms = result.hand_landmarks[0]
-                self._center0 = self._hand_center(lms, w, h)
+                self._center0 = self._fingertip(lms, w, h)
 
         # ── Draw everything ──
         self._draw_hud(frame)
         return frame
-
-    # ── calibration ───────────────────────────────────────────────
-    def calibrate(self) -> None:
-        """Save the current hand distance as the MAX (100 % volume) endpoint."""
-        if self._distance <= 0:
-            return
-        self.calib_max_dist = self._distance
-        self._calibrated = True
-        self._volume_buffer.clear()
-        print(f"[CALIBRATED]  max-dist = {self._distance:.4f}  "
-              f"(min-dist = {self.calib_min_dist:.4f})")
-
 
 # ===================================================================
 # main
@@ -437,8 +423,8 @@ def main() -> None:
     print(f"Audio API: {status}")
     print("=" * 56)
     print("Dual-Hand Volume Controller -- MediaPipe Hands")
-    print("  Spread your hands wide and press 'c' to calibrate.")
-    print("  Move apart -> louder  |  Move close -> quieter")
+    print("  Index fingertips < 0.1 apart -> mute (0%)")
+    print("  Index fingertips > 0.5 apart -> max  (100%)")
     print("  q = quit")
     print("=" * 56)
 
@@ -456,8 +442,6 @@ def main() -> None:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            elif key == ord("c"):
-                controller.calibrate()
 
     cv2.destroyAllWindows()
     print("Done.")
