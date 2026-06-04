@@ -3,13 +3,13 @@ Dual-Hand Volume Controller with MediaPipe Hands
 ==================================================
 Control your system master volume by moving your hands apart or together.
 
-- Move hands **apart**  → volume **up**   (100 %)
-- Move hands **close**   → volume **down**  (0 %)
+- Move hands **apart**  -> volume **up**   (100 %)
+- Move hands **close**   -> volume **down**  (0 %)
 - Press **'c'** to calibrate (hands wide = max volume).
 - Press **'q'** to quit.
 
 Uses MediaPipe Hands (Tasks API) for hand tracking and the native Windows
-Core Audio API (via **ctypes**) for system volume control — **no external
+Core Audio API (via **ctypes**) for system volume control -- **no external
 audio dependencies required**.
 """
 
@@ -35,8 +35,15 @@ from common import (
     suppress_gpu_warnings,
 )
 
+# ---------------------------------------------------------------------------
+# Environment & model
+# ---------------------------------------------------------------------------
+clear_mediapipe_cache()
+suppress_gpu_warnings()
+MODEL_PATH = get_model_path()
+
 # ===================================================================
-# Windows Core Audio Volume Control (ctypes — zero dependencies)
+# Windows Core Audio Volume Control (ctypes -- zero dependencies)
 # ===================================================================
 # COM IAudioEndpointVolume vtable layout (after IUnknown's 3 methods):
 #   3: RegisterControlChangeNotify
@@ -78,7 +85,7 @@ _p_vol: Optional[c_void_p] = None
 
 
 def _init_volume() -> Optional[c_void_p]:
-    """Create MMDeviceEnumerator → default speaker → IAudioEndpointVolume."""
+    """Create MMDeviceEnumerator -> default speaker -> IAudioEndpointVolume."""
     try:
         hr = windll.ole32.CoInitialize(None)
         if hr < 0 and hr != 0x00000001:
@@ -132,7 +139,7 @@ def _set_system_volume_scalar(scalar: float) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MediaPipe setup (Tasks API — Hand Landmarker)
+# MediaPipe setup (Tasks API -- Hand Landmarker)
 # ---------------------------------------------------------------------------
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -179,7 +186,7 @@ class DualHandVolumeController:
         self.calib_min_dist: float = 0.03   # hands nearly touching
         self._calibrated = False
 
-        # Smoothing — moving average over last N raw values
+        # Smoothing -- moving average over last N raw values
         self._smooth_window = 8
         self._volume_buffer: deque[float] = deque(maxlen=self._smooth_window)
 
@@ -259,11 +266,11 @@ class DualHandVolumeController:
                       (bar_x, bar_top), (bar_x + bar_w, bar_bottom),
                       (100, 100, 100), 1)
 
-        # Filled portion (bottom → up)
+        # Filled portion (bottom -> up)
         fill_h = int(bar_h * volume_pct / 100)
         fill_y = bar_bottom - fill_h
 
-        # Gradient colour: red (low) → yellow → green (high)
+        # Gradient colour: red (low) -> yellow -> green (high)
         r = int(255 * (1 - volume_pct / 100))
         g = int(255 * volume_pct / 100)
         bar_color = (0, g, r)
@@ -301,7 +308,7 @@ class DualHandVolumeController:
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
         if not self._calibrated:
-            status = ("NOT CALIBRATED — spread hands wide, press 'c'")
+            status = ("NOT CALIBRATED -- spread hands wide, press 'c'")
             status_color = (0, 165, 255)
         elif self._hands_visible != 2:
             status = f"Waiting for 2 hands...  (visible: {self._hands_visible})"
@@ -317,7 +324,7 @@ class DualHandVolumeController:
         # ── Keybinding hints (bottom) ──
         hints = "Q = quit   |   C = calibrate max distance"
         if not _VOLUME_AVAILABLE:
-            hints += "   |   (visual-only mode — audio API unavailable)"
+            hints += "   |   (visual-only mode -- audio API unavailable)"
         cv2.putText(frame, hints,
                     (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, GREY, 1, cv2.LINE_AA)
@@ -377,7 +384,7 @@ class DualHandVolumeController:
         self._hands_visible = (len(result.hand_landmarks)
                                if result.hand_landmarks else 0)
 
-        # ── Two hands → compute volume ──
+        # ── Two hands -> compute volume ──
         if result.hand_landmarks and len(result.hand_landmarks) == 2:
             lms0 = result.hand_landmarks[0]
             lms1 = result.hand_landmarks[1]
@@ -429,9 +436,9 @@ def main() -> None:
     print(f"Model: {MODEL_PATH}")
     print(f"Audio API: {status}")
     print("=" * 56)
-    print("Dual-Hand Volume Controller — MediaPipe Hands")
+    print("Dual-Hand Volume Controller -- MediaPipe Hands")
     print("  Spread your hands wide and press 'c' to calibrate.")
-    print("  Move apart → louder  |  Move close → quieter")
+    print("  Move apart -> louder  |  Move close -> quieter")
     print("  q = quit")
     print("=" * 56)
 
