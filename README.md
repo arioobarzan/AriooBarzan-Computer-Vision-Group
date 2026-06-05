@@ -17,7 +17,7 @@
 │   ├── Dual-Hand-Volume-Controller/  #   Control system volume with hand gestures
 │   └── Virtual-Blackboard/    #   Draw, erase, and idle on a digital canvas with hand gestures
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
-├── Books/                     # (coming) Book notes, summaries, and references
+├── Books/                     # Reference books on CV, image processing, and graphics
 ├── Papers/                    # (coming) Paper reviews and implementations
 ├── README.md
 └── .gitignore
