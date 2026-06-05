@@ -3,13 +3,13 @@ Virtual Blackboard with MediaPipe Hands
 =========================================
 Draw on a digital canvas using hand gestures in the air.
 
-Gestures (detected via finger-extension logic):
+Gestures (detected via robust finger-extension logic with margin):
   - **Index finger only**  -> DRAW  (white line on black canvas)
   - **Index + middle**     -> ERASE (thick black circle wipes content)
   - **Anything else**      -> IDLE  (no drawing, resets stroke)
 
 Two windows open:
-  1. Webcam feed with gesture feedback overlay
+  1. Webcam feed with gesture feedback + finger-state debug panel
   2. Full-screen black canvas where drawing appears
 
 Press 'q' to quit, 'c' to clear the canvas.
@@ -58,7 +58,13 @@ MIDDLE_TIP = 12
 RING_TIP = 16
 PINKY_TIP = 20
 
-# PIP / IP joints (used for extension checks)
+# MCP joints (base knuckles)
+INDEX_MCP = 5
+MIDDLE_MCP = 9
+RING_MCP = 13
+PINKY_MCP = 17
+
+# PIP / IP joints
 THUMB_IP = 3
 INDEX_PIP = 6
 MIDDLE_PIP = 10
@@ -66,18 +72,25 @@ RING_PIP = 14
 PINKY_PIP = 18
 
 # ---------------------------------------------------------------------------
+# Finger-detection parameters (normalised, 0..1)
+# ---------------------------------------------------------------------------
+FINGER_UP_Y_MARGIN = 0.06   # tip must be at least 6% of frame height above PIP
+THUMB_CLOSED_DIST = 0.12    # thumb tip near index MCP -> thumb is folded
+
+# ---------------------------------------------------------------------------
 # Drawing constants
 # ---------------------------------------------------------------------------
 DRAW_COLOR = (255, 255, 255)   # white ink
 ERASE_COLOR = (0, 0, 0)        # black (canvas background)
-DRAW_THICKNESS = 4
-ERASE_RADIUS = 30
+DRAW_THICKNESS = 5
+ERASE_RADIUS = 35
 
 # Feedback colours (BGR)
 GREEN = (0, 255, 80)
 RED = (0, 50, 255)
-BLUE = (255, 165, 0)
+ORANGE = (0, 165, 255)
 GREY = (180, 180, 180)
+WHITE = (255, 255, 255)
 
 # ---------------------------------------------------------------------------
 # Gesture state machine
@@ -94,9 +107,9 @@ class VirtualBlackboard:
     """
     Gesture-driven drawing canvas.
 
-    - Detects which fingers are extended via tip-vs-PIP comparison.
-    - State machine: DRAW (index only) | ERASE (index+middle) | IDLE.
-    - Draws on a persistent black canvas; webcam overlay shows feedback.
+    - Detects which fingers are extended using tip-vs-PIP with margin.
+    - Thumb uses proximity to index MCP (folded thumb = near index base).
+    - State machine with 2-frame debounce prevents flicker.
     """
 
     def __init__(self):
@@ -119,6 +132,11 @@ class VirtualBlackboard:
         self._state = STATE_IDLE
         self._frame_idx = 0
 
+        # 2-frame debounce: state must be same for N frames to take effect
+        self._pending_state: Optional[str] = None
+        self._pending_count = 0
+        self._debounce_frames = 2
+
     # ── context manager ───────────────────────────────────────────
     def __enter__(self) -> "VirtualBlackboard":
         return self
@@ -130,50 +148,82 @@ class VirtualBlackboard:
         if hasattr(self, "_detector"):
             self._detector.close()
 
-    # ── finger-extension logic ────────────────────────────────────
+    # ── finger-extension logic (robust, with margin) ──────────────
     @staticmethod
     def _is_finger_up(tip_lm, pip_lm) -> bool:
         """
-        A finger is considered 'up' (extended) when its tip is above
-        its PIP joint in the image (tip.y < pip.y).
+        A finger is extended when its tip is clearly above the PIP joint.
+        We require a margin (FINGER_UP_Y_MARGIN) to prevent flicker
+        when the finger is partially bent.
         """
-        return tip_lm.y < pip_lm.y
+        return tip_lm.y < pip_lm.y - FINGER_UP_Y_MARGIN
 
     @staticmethod
-    def _is_thumb_up(tip_lm, ip_lm) -> bool:
+    def _is_finger_down(tip_lm, pip_lm) -> bool:
         """
-        Thumb extension is checked by horizontal offset: when the thumb
-        is out, the tip is further from the palm centre than the IP.
-        We use the x-coordinate sign depends on which hand is shown,
-        so we check absolute distance from the wrist landmark 0.
-        For simplicity we compare tip.x vs ip.x — for a right hand
-        facing the camera the thumb tip.x < ip.x when extended.
+        A finger is folded/closed when its tip is below or at the
+        same level as its PIP joint.
         """
-        # For mirrored webcam: thumb extended = tip is to the right of IP
-        return tip_lm.x > ip_lm.x
+        return tip_lm.y >= pip_lm.y
 
-    def _classify_gesture(self, landmarks) -> str:
+    @staticmethod
+    def _is_thumb_closed(tip_lm, index_mcp_lm) -> bool:
+        """
+        Thumb is folded (closed) when its tip sits close to the
+        index-finger MCP joint (the base of the index finger).
+        Uses a normalised Euclidean distance threshold.
+        """
+        dx = tip_lm.x - index_mcp_lm.x
+        dy = tip_lm.y - index_mcp_lm.y
+        return (dx * dx + dy * dy) < THUMB_CLOSED_DIST ** 2
+
+    def _classify_gesture(self, landmarks) -> tuple[str, dict]:
         """
         Determine gesture from finger-extension state.
 
-        Returns one of STATE_DRAW, STATE_ERASE, STATE_IDLE.
+        Returns (state, finger_states_dict) where finger_states
+        is useful for debug overlay.
         """
         lms = landmarks
-        thumb_up = self._is_thumb_up(lms[THUMB_TIP], lms[THUMB_IP])
+        thumb_closed = self._is_thumb_closed(lms[THUMB_TIP], lms[INDEX_MCP])
         index_up = self._is_finger_up(lms[INDEX_TIP], lms[INDEX_PIP])
         middle_up = self._is_finger_up(lms[MIDDLE_TIP], lms[MIDDLE_PIP])
         ring_up = self._is_finger_up(lms[RING_TIP], lms[RING_PIP])
         pinky_up = self._is_finger_up(lms[PINKY_TIP], lms[PINKY_PIP])
 
-        # DRAW: index only (all others down)
-        if index_up and not middle_up and not ring_up and not pinky_up and not thumb_up:
-            return STATE_DRAW
+        finger_states = {
+            "thumb": "closed" if thumb_closed else "open",
+            "index": "up" if index_up else "down",
+            "middle": "up" if middle_up else "down",
+            "ring": "up" if ring_up else "down",
+            "pinky": "up" if pinky_up else "down",
+        }
 
-        # ERASE: index + middle (ring, pinky, thumb down)
-        if index_up and middle_up and not ring_up and not pinky_up and not thumb_up:
-            return STATE_ERASE
+        # DRAW: index only, all others down/folded
+        if (index_up and not middle_up and not ring_up
+                and not pinky_up and thumb_closed):
+            return STATE_DRAW, finger_states
 
-        return STATE_IDLE
+        # ERASE: index + middle, ring/pinky down, thumb closed
+        if (index_up and middle_up and not ring_up
+                and not pinky_up and thumb_closed):
+            return STATE_ERASE, finger_states
+
+        return STATE_IDLE, finger_states
+
+    # ── debounced state transition ─────────────────────────────────
+    def _debounce_state(self, raw_state: str) -> str:
+        """Require *raw_state* to be seen N consecutive frames before
+           actually switching from the current ``_state``."""
+        if raw_state == self._pending_state:
+            self._pending_count += 1
+        else:
+            self._pending_state = raw_state
+            self._pending_count = 1
+
+        if self._pending_count >= self._debounce_frames:
+            return raw_state
+        return self._state
 
     # ── canvas management ─────────────────────────────────────────
     def _ensure_canvas(self, h: int, w: int) -> None:
@@ -194,10 +244,14 @@ class VirtualBlackboard:
 
     # ── drawing on canvas ─────────────────────────────────────────
     def _draw_stroke(self, p: tuple[int, int]) -> None:
-        """Draw a continuous white line from the previous point to *p*."""
+        """Draw a white line (or dot) from the previous point to *p*."""
         if self._prev_pos is not None:
             cv2.line(self._canvas, self._prev_pos, p,
                      DRAW_COLOR, DRAW_THICKNESS, cv2.LINE_AA)
+        else:
+            # First frame in DRAW: draw a dot so user sees instant feedback
+            cv2.circle(self._canvas, p, DRAW_THICKNESS,
+                       DRAW_COLOR, -1, cv2.LINE_AA)
         self._prev_pos = p
 
     def _erase_stroke(self, p: tuple[int, int]) -> None:
@@ -210,13 +264,14 @@ class VirtualBlackboard:
         self._prev_pos = None
 
     # ── webcam overlay ────────────────────────────────────────────
-    def _draw_overlay(self, frame: np.ndarray, landmarks,
+    def _draw_overlay(self, frame: np.ndarray, lms,
+                      finger_states: dict,
                       index_tip_px: tuple[int, int],
-                      middle_tip_px: Optional[tuple[int, int]]) -> None:
-        """Render gesture feedback on the webcam frame."""
-        h, w = frame.shape[:2]
+                      middle_tip_px: Optional[tuple[int, int]],
+                      h: int, w: int) -> None:
+        """Render status banner, fingertip indicators, and debug panel."""
 
-        # -- Status banner (top) --
+        # ── Status banner (top) ──
         if self._state == STATE_DRAW:
             banner_color, banner_text = GREEN, "Status: Drawing"
             tip_color = GREEN
@@ -231,28 +286,48 @@ class VirtualBlackboard:
         cv2.rectangle(overlay, (0, 0), (w, 60), banner_color, -1)
         cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
         cv2.putText(frame, banner_text, (w // 2 - 150, 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, WHITE, 2, cv2.LINE_AA)
 
-        # -- Active fingertip circles --
-        cv2.circle(frame, index_tip_px, 12, tip_color, -1, cv2.LINE_AA)
-        cv2.circle(frame, index_tip_px, 12, (255, 255, 255), 2, cv2.LINE_AA)
-
-        if middle_tip_px is not None:
-            cv2.circle(frame, middle_tip_px, 12, tip_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, middle_tip_px, 12, (255, 255, 255), 2, cv2.LINE_AA)
-
-        # -- Finger labels --
-        index_label = "DRAW" if self._state == STATE_DRAW else "INDEX"
-        cv2.putText(frame, index_label,
-                    (index_tip_px[0] + 18, index_tip_px[1] + 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, tip_color, 1, cv2.LINE_AA)
+        # ── Active fingertip circles ──
+        cv2.circle(frame, index_tip_px, 14, tip_color, -1, cv2.LINE_AA)
+        cv2.circle(frame, index_tip_px, 14, WHITE, 2, cv2.LINE_AA)
 
         if middle_tip_px is not None:
-            cv2.putText(frame, "ERASE",
-                        (middle_tip_px[0] + 18, middle_tip_px[1] + 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, tip_color, 1, cv2.LINE_AA)
+            cv2.circle(frame, middle_tip_px, 14, tip_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, middle_tip_px, 14, WHITE, 2, cv2.LINE_AA)
 
-        # -- Help text (bottom) --
+        # ── Debug panel: finger states (top-right) ──
+        panel_w = 150
+        panel_h = 160
+        panel_x = w - panel_w - 10
+        panel_y = 70
+
+        cv2.rectangle(frame,
+                      (panel_x - 2, panel_y - 2),
+                      (panel_x + panel_w + 2, panel_y + panel_h + 2),
+                      (20, 20, 20), -1)
+        cv2.rectangle(frame,
+                      (panel_x, panel_y),
+                      (panel_x + panel_w, panel_y + panel_h),
+                      (80, 80, 80), 1)
+
+        finger_names = ["thumb", "index", "middle", "ring", "pinky"]
+        for i, name in enumerate(finger_names):
+            fstate = finger_states.get(name, "?")
+            if fstate in ("up", "open"):
+                dot_color = GREEN
+            elif fstate == "closed":
+                dot_color = ORANGE
+            else:
+                dot_color = RED
+
+            y = panel_y + 18 + i * 26
+            cv2.circle(frame, (panel_x + 14, y), 6, dot_color, -1, cv2.LINE_AA)
+            cv2.putText(frame, f"{name}: {fstate}",
+                        (panel_x + 28, y + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1, cv2.LINE_AA)
+
+        # ── Help text (bottom) ──
         cv2.putText(frame, "Q = quit  |  C = clear canvas",
                     (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, GREY, 1, cv2.LINE_AA)
@@ -276,6 +351,8 @@ class VirtualBlackboard:
 
         index_tip_px: Optional[tuple[int, int]] = None
         middle_tip_px: Optional[tuple[int, int]] = None
+        lms = None
+        finger_states: dict = {}
         prev_state = self._state
 
         # ── Hand detected ──
@@ -285,7 +362,8 @@ class VirtualBlackboard:
             index_tip_px = self._to_px(lms[INDEX_TIP], w, h)
             middle_tip_px = self._to_px(lms[MIDDLE_TIP], w, h)
 
-            self._state = self._classify_gesture(lms)
+            raw_state, finger_states = self._classify_gesture(lms)
+            self._state = self._debounce_state(raw_state)
 
             # State change -> break stroke continuity
             if self._state != prev_state:
@@ -306,10 +384,19 @@ class VirtualBlackboard:
             self._reset_stroke()
 
         # ── Overlays ──
-        if index_tip_px:
-            self._draw_overlay(frame, lms if result.hand_landmarks else None,
-                               index_tip_px,
-                               middle_tip_px if self._state == STATE_ERASE else None)
+        if index_tip_px is not None:
+            self._draw_overlay(frame, lms, finger_states,
+                               index_tip_px, middle_tip_px, h, w)
+        else:
+            # No hand visible — show idle banner
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, 60), GREY, -1)
+            cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
+            cv2.putText(frame, "Status: Idle (no hand)", (w // 2 - 180, 42),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, WHITE, 2, cv2.LINE_AA)
+            cv2.putText(frame, "Q = quit  |  C = clear canvas",
+                        (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, GREY, 1, cv2.LINE_AA)
 
         return frame, self._canvas
 
