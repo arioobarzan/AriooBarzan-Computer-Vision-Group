@@ -14,7 +14,8 @@
 │   ├── Hand-Clap-Counter/     #   Real-time hand-clap counter via webcam
 │   ├── Anti-Slouch-Alarm/     #   Posture monitor with slouch alarm
 │   ├── Virtual-Drum-Kit/      #   Play drums in the air with your fingers
-│   └── Dual-Hand-Volume-Controller/  #   Control system volume with hand gestures
+│   ├── Dual-Hand-Volume-Controller/  #   Control system volume with hand gestures
+│   └── Virtual-Blackboard/    #   Draw, erase, and idle on a digital canvas with hand gestures
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
 ├── Books/                     # (coming) Book notes, summaries, and references
 ├── Papers/                    # (coming) Paper reviews and implementations
@@ -32,7 +33,8 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 | [**Hand Clap Counter**](Sample%20Codes/Hand-Clap-Counter/) | Count hand claps in real time via webcam. Live counter overlay with visual feedback. | MediaPipe Hands, OpenCV |
 | [**Anti-Slouch Alarm**](Sample%20Codes/Anti-Slouch-Alarm/) | Real-time posture monitor. Calibrate your upright posture, get alerted when you slouch or lean too close to the screen. | MediaPipe Pose, OpenCV |
 | [**Virtual Drum Kit**](Sample%20Codes/Virtual-Drum-Kit/) | Play drums in the air. Tap circular pads with your index fingers to trigger sounds. Built-in synth sounds + support for custom WAV files. | MediaPipe Hands, OpenCV |
-| [**Dual-Hand Volume Controller**](Sample%20Codes/Dual-Hand-Volume-Controller/) | Control Windows master volume with hand gestures. Move hands apart for louder, close for quieter. | MediaPipe Hands, OpenCV, Win32 Core Audio |
+| [**Dual-Hand Volume Controller**](Sample%20Codes/Dual-Hand-Volume-Controller/) | Control your system volume by moving your hands. Bring hands together to mute, or spread them apart to crank up the volume. | MediaPipe Hands, OpenCV |
+| [**Virtual Blackboard**](Sample%20Codes/Virtual-Blackboard/) | Write on a pure black digital canvas using your index finger. Raise both index and middle fingers to erase, or open your hand to pause drawing. | MediaPipe Hands, OpenCV, NumPy |
 
 ### Shared Utilities (`Sample Codes/common/`)
 
