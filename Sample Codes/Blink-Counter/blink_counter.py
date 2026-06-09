@@ -60,7 +60,7 @@ RIGHT_EYE = [362, 385, 387, 263, 373, 380]  # p1 … p6
 # ---------------------------------------------------------------------------
 # Blink-detection parameters
 # ---------------------------------------------------------------------------
-EAR_THRESHOLD = 0.20     # EAR below this → eye considered closed
+EAR_THRESHOLD = 0.25     # EAR below this → eye considered closed
 EAR_CLOSE_FRAMES = 2      # consecutive frames EAR must stay low before closure
 EAR_OPEN_FRAMES = 2       # consecutive frames EAR must stay high to confirm re-open
 
@@ -252,17 +252,6 @@ class BlinkCounter:
                  (0, 165, 255), 2, cv2.LINE_AA)
         cv2.putText(frame, "thresh", (th_x - 35, bar_y - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1, cv2.LINE_AA)
-
-        cv2.putText(frame, "Open <--- EAR ---> Closed",
-                    (bar_x + 40, bar_y + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1, cv2.LINE_AA)
-
-        # -- Eye-landmark dots --
-        for idx in LEFT_EYE + RIGHT_EYE:
-            lm = self._landmarks_all[idx] if self._landmarks_all else None
-            if lm:
-                x, y = int(lm.x * w), int(lm.y * h)
-                cv2.circle(frame, (x, y), 2, BLUE, -1, cv2.LINE_AA)
 
         # -- Quit/reset hints --
         cv2.putText(frame, "Q = quit  |  R = reset",
