@@ -7,6 +7,7 @@ import shutil
 
 HAND_MODEL_FILENAME = "hand_landmarker.task"
 POSE_MODEL_FILENAME = "pose_landmarker.task"
+FACE_MODEL_FILENAME = "face_landmarker.task"
 
 
 def clear_mediapipe_cache() -> None:

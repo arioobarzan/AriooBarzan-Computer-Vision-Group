@@ -15,7 +15,8 @@
 │   ├── Anti-Slouch-Alarm/     #   Posture monitor with slouch alarm
 │   ├── Virtual-Drum-Kit/      #   Play drums in the air with your fingers
 │   ├── Dual-Hand-Volume-Controller/  #   Control system volume with hand gestures
-│   └── Virtual-Blackboard/    #   Draw, erase, and idle on a digital canvas with hand gestures
+│   ├── Virtual-Blackboard/    #   Draw, erase, and idle on a digital canvas with hand gestures
+│   └── Blink-Counter/         #   Count eye blinks using EAR (Eye Aspect Ratio) + Face Mesh
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
 ├── Books/                     # Reference books on CV, image processing, and graphics
 ├── Papers/                    # (coming) Paper reviews and implementations
@@ -35,6 +36,7 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 | [**Virtual Drum Kit**](Sample%20Codes/Virtual-Drum-Kit/) | Play drums in the air. Tap circular pads with your index fingers to trigger sounds. Built-in synth sounds + support for custom WAV files. | MediaPipe Hands, OpenCV |
 | [**Dual-Hand Volume Controller**](Sample%20Codes/Dual-Hand-Volume-Controller/) | Control your system volume by moving your hands. Bring hands together to mute, or spread them apart to crank up the volume. | MediaPipe Hands, OpenCV |
 | [**Virtual Blackboard**](Sample%20Codes/Virtual-Blackboard/) | Write on a pure black digital canvas using your index finger. Raise both index and middle fingers to erase, or open your hand to pause drawing. | MediaPipe Hands, OpenCV, NumPy |
+| [**Blink Counter**](Sample%20Codes/Blink-Counter/) | Count your eye blinks in real time using the Eye Aspect Ratio (EAR) formula on Face Mesh landmarks. | MediaPipe Face Mesh, OpenCV |
 
 ### Shared Utilities (`Sample Codes/common/`)
 

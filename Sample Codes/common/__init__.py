@@ -10,6 +10,7 @@ Provides:
 from .camera import WebcamManager
 from .drawing import draw_gradient_line
 from .mediapipe_utils import (
+    FACE_MODEL_FILENAME,
     HAND_MODEL_FILENAME,
     POSE_MODEL_FILENAME,
     clear_mediapipe_cache,
@@ -21,6 +22,7 @@ __all__ = [
     "WebcamManager",
     "draw_gradient_line",
     "clear_mediapipe_cache",
+    "FACE_MODEL_FILENAME",
     "get_model_path",
     "HAND_MODEL_FILENAME",
     "POSE_MODEL_FILENAME",
