@@ -201,8 +201,9 @@ class RockPaperScissorsAI:
         # A finger is "up" if above its per-finger threshold
         up = {k: self._ratios[k] >= EXTENDED_RATIO[k] for k in self._ratios}
 
-        # All 5 extended = Paper
-        if up[INDEX_TIP] and up[MIDDLE_TIP] and up[RING_TIP] and up[PINKY_TIP] and up[THUMB_TIP]:
+        # Paper: at least 4 of 5 fingers have ratio > 1.0
+        above_one = sum(1 for k in self._ratios if self._ratios[k] > 1.0)
+        if above_one >= 4:
             return "Paper"
 
         # Only index + middle extended, others folded = Scissors
