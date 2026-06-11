@@ -81,8 +81,16 @@ DISPLAY_POINTS = [
 # A finger is "extended" when its tip is far enough from the wrist
 # relative to the palm size.  This is scale- and orientation-invariant.
 # ---------------------------------------------------------------------------
-EXTENDED_RATIO = 1.65       # fingertip-to-wrist > 1.65 * palm_size -> extended
-FOLDED_RATIO = 1.30         # fingertip-to-wrist < 1.30 * palm_size -> folded
+# Per-finger thresholds account for different finger lengths.
+# Pinky & ring are shorter → lower ceiling when fully open.
+EXTENDED_RATIO = {
+    THUMB_TIP: 1.50,
+    INDEX_TIP: 1.55,
+    MIDDLE_TIP: 1.55,
+    RING_TIP: 1.40,
+    PINKY_TIP: 1.35,
+}
+FOLDED_RATIO = 1.25         # any finger below this is definitely folded
 
 # ---------------------------------------------------------------------------
 # Game timing (seconds)
@@ -181,31 +189,29 @@ class RockPaperScissorsAI:
         lms = landmarks
 
         # Compute extension ratio for each finger
-        thumb_r = self._extension_ratio(lms, THUMB_TIP)
-        index_r = self._extension_ratio(lms, INDEX_TIP)
-        middle_r = self._extension_ratio(lms, MIDDLE_TIP)
-        ring_r = self._extension_ratio(lms, RING_TIP)
-        pinky_r = self._extension_ratio(lms, PINKY_TIP)
+        ratios = {
+            THUMB_TIP: self._extension_ratio(lms, THUMB_TIP),
+            INDEX_TIP: self._extension_ratio(lms, INDEX_TIP),
+            MIDDLE_TIP: self._extension_ratio(lms, MIDDLE_TIP),
+            RING_TIP: self._extension_ratio(lms, RING_TIP),
+            PINKY_TIP: self._extension_ratio(lms, PINKY_TIP),
+        }
 
-        # A finger is "up" if its ratio exceeds EXTENDED_RATIO
-        index_up = index_r >= EXTENDED_RATIO
-        middle_up = middle_r >= EXTENDED_RATIO
-        ring_up = ring_r >= EXTENDED_RATIO
-        pinky_up = pinky_r >= EXTENDED_RATIO
-        thumb_up = thumb_r >= EXTENDED_RATIO
+        # A finger is "up" if above its per-finger threshold
+        up = {k: ratios[k] >= EXTENDED_RATIO[k] for k in ratios}
 
         # All 5 extended = Paper
-        if index_up and middle_up and ring_up and pinky_up and thumb_up:
+        if up[INDEX_TIP] and up[MIDDLE_TIP] and up[RING_TIP] and up[PINKY_TIP] and up[THUMB_TIP]:
             return "Paper"
 
-        # Only index + middle extended = Scissors
-        if (index_up and middle_up and not ring_up
-                and not pinky_up and not thumb_up):
+        # Only index + middle extended, others folded = Scissors
+        if (up[INDEX_TIP] and up[MIDDLE_TIP]
+                and not up[RING_TIP] and not up[PINKY_TIP]
+                and not up[THUMB_TIP]):
             return "Scissors"
 
         # All 5 folded = Rock
-        if (not index_up and not middle_up and not ring_up
-                and not pinky_up and not thumb_up):
+        if all(ratios[k] < FOLDED_RATIO for k in ratios):
             return "Rock"
 
         return "?"
