@@ -8,10 +8,10 @@ Play Rock-Paper-Scissors against the computer using your webcam.
 - At "SHOOT!" your gesture is captured, the AI picks randomly,
   and the winner is announced.
 
-Gestures (rule-based finger-extension logic):
-  Rock     — all 5 fingers folded
-  Paper    — all 5 fingers extended
-  Scissors — only index + middle extended, others folded
+Gestures (geometry-based, using fingertip-to-wrist distance ratios):
+  Rock     — all 5 fingertips close to wrist (fingers folded)
+  Paper    — all 5 fingertips far from wrist (fingers extended)
+  Scissors — index + middle far, ring + pinky close, thumb close
 
 Press 'q' to quit.
 """
@@ -54,25 +54,35 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 # ---------------------------------------------------------------------------
 # Landmark indices
 # ---------------------------------------------------------------------------
+WRIST = 0
 THUMB_TIP = 4
 INDEX_TIP = 8
 MIDDLE_TIP = 12
 RING_TIP = 16
 PINKY_TIP = 20
+MIDDLE_MCP = 9      # palm-centre reference for normalisation
 
-THUMB_IP = 3
-INDEX_PIP = 6
-MIDDLE_PIP = 10
-RING_PIP = 14
-PINKY_PIP = 18
-
-INDEX_MCP = 5
+# The 6 points we draw on the hand
+DISPLAY_POINTS = [
+    (WRIST,      "Wrist",  (0, 220, 255)),   # Gold
+    (THUMB_TIP,  "Thumb",  (255, 0, 0)),     # Blue
+    (INDEX_TIP,  "Index",  (0, 255, 0)),     # Green
+    (MIDDLE_TIP, "Middle", (0, 0, 255)),     # Red
+    (RING_TIP,   "Ring",   (255, 255, 0)),   # Cyan
+    (PINKY_TIP,  "Pinky",  (255, 0, 255)),   # Magenta
+]
 
 # ---------------------------------------------------------------------------
-# Finger-detection thresholds
+# Geometry-based finger-extension thresholds
+#
+# extension_ratio = distance(fingertip, wrist) / palm_size
+#   where palm_size = distance(wrist, middle_mcp)
+#
+# A finger is "extended" when its tip is far enough from the wrist
+# relative to the palm size.  This is scale- and orientation-invariant.
 # ---------------------------------------------------------------------------
-FINGER_UP_Y_MARGIN = 0.06    # tip must be at least 6 % of frame height above PIP
-THUMB_CLOSED_DIST = 0.12     # thumb tip near index MCP -> thumb is folded
+EXTENDED_RATIO = 1.65       # fingertip-to-wrist > 1.65 * palm_size -> extended
+FOLDED_RATIO = 1.30         # fingertip-to-wrist < 1.30 * palm_size -> folded
 
 # ---------------------------------------------------------------------------
 # Game timing (seconds)
@@ -102,9 +112,9 @@ class RockPaperScissorsAI:
     """
     Real-time Rock-Paper-Scissors game.
 
-    - Classifies hand gesture from finger-extension state.
-    - Auto countdown → capture at "SHOOT!" → AI picks → result.
-    - Persistent scoreboard.
+    - Classifies hand gesture from fingertip-to-wrist distance ratios.
+    - Auto countdown -> capture at "SHOOT!" -> AI picks -> result.
+    - Persistent scoreboard with 6-point hand overlay.
     """
 
     def __init__(self):
@@ -123,15 +133,19 @@ class RockPaperScissorsAI:
 
         # Round state
         self._round_start = time.time()
-        self._phase = "countdown"          # countdown | shoot | result
+        self._phase = "countdown"
         self._phase_start = time.time()
         self._user_gesture: str = "?"
         self._ai_choice: str = "?"
         self._result: str = ""
-        self._captured = False
 
         self._frame_idx = 0
         self._current_gesture: str = "?"
+
+        # Last-hand data for HUD drawing
+        self._landmarks = None
+        self._frame_h = 0
+        self._frame_w = 0
 
     # ── context manager ───────────────────────────────────────────
     def __enter__(self) -> "RockPaperScissorsAI":
@@ -144,44 +158,54 @@ class RockPaperScissorsAI:
         if hasattr(self, "_detector"):
             self._detector.close()
 
-    # ── finger detection ──────────────────────────────────────────
+    # ── geometry ──────────────────────────────────────────────────
     @staticmethod
-    def _is_finger_up(tip, pip) -> bool:
-        """Finger is extended when tip is clearly above PIP joint."""
-        return tip.y < pip.y - FINGER_UP_Y_MARGIN
+    def _dist(lm1, lm2) -> float:
+        """Normalised Euclidean distance between two landmarks."""
+        return np.hypot(lm1.x - lm2.x, lm1.y - lm2.y)
 
-    @staticmethod
-    def _is_finger_down(tip, pip) -> bool:
-        """Finger is folded when tip is at or below PIP joint."""
-        return tip.y >= pip.y
+    def _extension_ratio(self, lms, tip_idx: int) -> float:
+        """
+        Normalised distance from fingertip to wrist.
+        palm_size = |wrist -> middle MCP| serves as the reference.
 
-    @staticmethod
-    def _is_thumb_closed(tip, index_mcp) -> bool:
-        """Thumb is folded when tip sits near index-finger MCP."""
-        dx = tip.x - index_mcp.x
-        dy = tip.y - index_mcp.y
-        return (dx * dx + dy * dy) < THUMB_CLOSED_DIST ** 2
+        Returns a value typically in [0.5 (tight fist) ... 2.2 (fully open)].
+        """
+        palm_size = self._dist(lms[WRIST], lms[MIDDLE_MCP])
+        if palm_size < 0.01:
+            return 0.0
+        return self._dist(lms[tip_idx], lms[WRIST]) / palm_size
 
-    # ── gesture classification ────────────────────────────────────
+    # ── gesture classification (geometry-based) ───────────────────
     def _classify(self, landmarks) -> str:
         lms = landmarks
-        thumb_closed = self._is_thumb_closed(lms[THUMB_TIP], lms[INDEX_MCP])
-        index_up = self._is_finger_up(lms[INDEX_TIP], lms[INDEX_PIP])
-        middle_up = self._is_finger_up(lms[MIDDLE_TIP], lms[MIDDLE_PIP])
-        ring_up = self._is_finger_up(lms[RING_TIP], lms[RING_PIP])
-        pinky_up = self._is_finger_up(lms[PINKY_TIP], lms[PINKY_PIP])
 
-        # All 4 main fingers extended + thumb out = Paper
-        if index_up and middle_up and ring_up and pinky_up and not thumb_closed:
+        # Compute extension ratio for each finger
+        thumb_r = self._extension_ratio(lms, THUMB_TIP)
+        index_r = self._extension_ratio(lms, INDEX_TIP)
+        middle_r = self._extension_ratio(lms, MIDDLE_TIP)
+        ring_r = self._extension_ratio(lms, RING_TIP)
+        pinky_r = self._extension_ratio(lms, PINKY_TIP)
+
+        # A finger is "up" if its ratio exceeds EXTENDED_RATIO
+        index_up = index_r >= EXTENDED_RATIO
+        middle_up = middle_r >= EXTENDED_RATIO
+        ring_up = ring_r >= EXTENDED_RATIO
+        pinky_up = pinky_r >= EXTENDED_RATIO
+        thumb_up = thumb_r >= EXTENDED_RATIO
+
+        # All 5 extended = Paper
+        if index_up and middle_up and ring_up and pinky_up and thumb_up:
             return "Paper"
 
-        # Only index + middle extended, others folded = Scissors
-        if index_up and middle_up and not ring_up and not pinky_up and thumb_closed:
+        # Only index + middle extended = Scissors
+        if (index_up and middle_up and not ring_up
+                and not pinky_up and not thumb_up):
             return "Scissors"
 
-        # All fingers folded = Rock
+        # All 5 folded = Rock
         if (not index_up and not middle_up and not ring_up
-                and not pinky_up and thumb_closed):
+                and not pinky_up and not thumb_up):
             return "Rock"
 
         return "?"
@@ -195,50 +219,64 @@ class RockPaperScissorsAI:
         return "AI WINS!"
 
     # ── HUD ───────────────────────────────────────────────────────
+    def _draw_hand_points(self, frame: np.ndarray) -> None:
+        """Draw the 6 coloured dots on the hand (fingertips + wrist)."""
+        if self._landmarks is None:
+            return
+        lms = self._landmarks
+        h, w = self._frame_h, self._frame_w
+
+        for idx, _label, color in DISPLAY_POINTS:
+            x, y = int(lms[idx].x * w), int(lms[idx].y * h)
+            # Outer white ring
+            cv2.circle(frame, (x, y), 12, WHITE, 2, cv2.LINE_AA)
+            # Filled coloured dot
+            cv2.circle(frame, (x, y), 9, color, -1, cv2.LINE_AA)
+
+        # Connect fingertips to wrist with thin lines
+        wrist_xy = (int(lms[WRIST].x * w), int(lms[WRIST].y * h))
+        for tip_idx in [THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]:
+            tip_xy = (int(lms[tip_idx].x * w), int(lms[tip_idx].y * h))
+            cv2.line(frame, wrist_xy, tip_xy, (100, 100, 100), 1, cv2.LINE_AA)
+
     def _draw_hud(self, frame: np.ndarray, h: int, w: int) -> None:
-        """Render scoreboard, countdown / result, and gesture indicators."""
+        """Scoreboard, countdown / result, hand points."""
 
         # -- Top banner (scoreboard) --
         ov = frame.copy()
         cv2.rectangle(ov, (0, 0), (w, 80), DARK, -1)
         cv2.addWeighted(ov, 0.55, frame, 0.45, 0, dst=frame)
 
-        # User score (left)
         cv2.putText(frame, "YOU", (30, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, GREEN, 2, cv2.LINE_AA)
         cv2.putText(frame, str(self.user_score), (48, 70),
                     cv2.FONT_HERSHEY_DUPLEX, 1.6, GREEN, 3, cv2.LINE_AA)
 
-        # AI score (right)
         cv2.putText(frame, "AI", (w - 120, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, RED, 2, cv2.LINE_AA)
         cv2.putText(frame, str(self.ai_score), (w - 105, 70),
                     cv2.FONT_HERSHEY_DUPLEX, 1.6, RED, 3, cv2.LINE_AA)
 
-        # Current gesture (centre of banner)
         g_color = GREEN if self._current_gesture != "?" else GREY
         cv2.putText(frame, f"Gesture: {self._current_gesture}",
                     (w // 2 - 110, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.85, g_color, 2, cv2.LINE_AA)
 
-        # -- Countdown / Result (centre of frame) --
+        # -- Countdown / Result (centre) --
         elapsed = time.time() - self._phase_start
 
         if self._phase == "countdown":
             remaining = max(0, COUNTDOWN_SECS - elapsed)
             num = int(remaining) + 1
             if num > 0:
-                count_text = str(num)
-                cv2.putText(frame, count_text,
+                cv2.putText(frame, str(num),
                             (w // 2 - 60, h // 2 + 20),
                             cv2.FONT_HERSHEY_DUPLEX, 6, WHITE, 8, cv2.LINE_AA)
         elif self._phase == "shoot":
-            # "SHOOT!" appears briefly
             cv2.putText(frame, "SHOOT!",
                         (w // 2 - 220, h // 2 + 20),
                         cv2.FONT_HERSHEY_DUPLEX, 5, BLUE, 7, cv2.LINE_AA)
         elif self._phase == "result":
-            # Show user vs AI side-by-side
             cv2.putText(frame, f"YOU: {self._user_gesture}",
                         (w // 2 - 380, h // 2 - 80),
                         cv2.FONT_HERSHEY_DUPLEX, 1.8, GREEN, 4, cv2.LINE_AA)
@@ -246,7 +284,6 @@ class RockPaperScissorsAI:
                         (w // 2 + 30, h // 2 - 80),
                         cv2.FONT_HERSHEY_DUPLEX, 1.8, RED, 4, cv2.LINE_AA)
 
-            # Result (large, centre)
             if self._result == "YOU WIN!":
                 r_color = GREEN
             elif self._result == "AI WINS!":
@@ -265,6 +302,7 @@ class RockPaperScissorsAI:
     # ── update ────────────────────────────────────────────────────
     def update(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
+        self._frame_h, self._frame_w = h, w
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -274,8 +312,10 @@ class RockPaperScissorsAI:
         now = time.time()
 
         # ── Gesture detection ──
+        self._landmarks = None
         if result.hand_landmarks and len(result.hand_landmarks) > 0:
-            self._current_gesture = self._classify(result.hand_landmarks[0])
+            self._landmarks = result.hand_landmarks[0]
+            self._current_gesture = self._classify(self._landmarks)
         else:
             self._current_gesture = "?"
 
@@ -285,7 +325,6 @@ class RockPaperScissorsAI:
         if self._phase == "countdown" and elapsed >= COUNTDOWN_SECS:
             self._phase = "shoot"
             self._phase_start = now
-            # Capture gesture + AI pick
             self._user_gesture = (self._current_gesture
                                   if self._current_gesture != "?" else "Rock")
             self._ai_choice = random.choice(GESTURES)
@@ -304,7 +343,8 @@ class RockPaperScissorsAI:
             self._phase = "countdown"
             self._phase_start = now
 
-        # ── HUD ──
+        # ── Draw hand points + HUD ──
+        self._draw_hand_points(frame)
         self._draw_hud(frame, h, w)
         return frame
 
@@ -316,6 +356,7 @@ def main() -> None:
     print("Rock-Paper-Scissors AI -- MediaPipe Hands")
     print("  Show Rock, Paper, or Scissors to the camera.")
     print("  3-second countdown, then gesture is captured.")
+    print("  6 coloured dots show tracked points on your hand.")
     print("  q = quit")
     print("=" * 50)
 
