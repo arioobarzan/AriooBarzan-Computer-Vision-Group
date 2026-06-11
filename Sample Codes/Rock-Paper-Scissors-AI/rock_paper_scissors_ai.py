@@ -154,6 +154,7 @@ class RockPaperScissorsAI:
         self._landmarks = None
         self._frame_h = 0
         self._frame_w = 0
+        self._ratios: dict[int, float] = {}   # last computed ratios for display
 
     # ── context manager ───────────────────────────────────────────
     def __enter__(self) -> "RockPaperScissorsAI":
@@ -188,8 +189,8 @@ class RockPaperScissorsAI:
     def _classify(self, landmarks) -> str:
         lms = landmarks
 
-        # Compute extension ratio for each finger
-        ratios = {
+        # Compute extension ratio for each finger (fingertip-to-wrist / palm-size)
+        self._ratios = {
             THUMB_TIP: self._extension_ratio(lms, THUMB_TIP),
             INDEX_TIP: self._extension_ratio(lms, INDEX_TIP),
             MIDDLE_TIP: self._extension_ratio(lms, MIDDLE_TIP),
@@ -198,7 +199,7 @@ class RockPaperScissorsAI:
         }
 
         # A finger is "up" if above its per-finger threshold
-        up = {k: ratios[k] >= EXTENDED_RATIO[k] for k in ratios}
+        up = {k: self._ratios[k] >= EXTENDED_RATIO[k] for k in self._ratios}
 
         # All 5 extended = Paper
         if up[INDEX_TIP] and up[MIDDLE_TIP] and up[RING_TIP] and up[PINKY_TIP] and up[THUMB_TIP]:
@@ -211,7 +212,7 @@ class RockPaperScissorsAI:
             return "Scissors"
 
         # All 5 folded = Rock
-        if all(ratios[k] < FOLDED_RATIO for k in ratios):
+        if all(self._ratios[k] < FOLDED_RATIO for k in self._ratios):
             return "Rock"
 
         return "?"
@@ -226,11 +227,23 @@ class RockPaperScissorsAI:
 
     # ── HUD ───────────────────────────────────────────────────────
     def _draw_hand_points(self, frame: np.ndarray) -> None:
-        """Draw the 6 coloured dots on the hand (fingertips + wrist)."""
+        """Draw the 6 coloured dots + extension-ratio labels on each fingertip."""
         if self._landmarks is None:
             return
         lms = self._landmarks
         h, w = self._frame_h, self._frame_w
+
+        wrist_xy = (int(lms[WRIST].x * w), int(lms[WRIST].y * h))
+
+        # Palm-size reference line (wrist -> middle MCP)
+        mcp_xy = (int(lms[MIDDLE_MCP].x * w), int(lms[MIDDLE_MCP].y * h))
+        cv2.line(frame, wrist_xy, mcp_xy, (0, 220, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "palm", (mcp_xy[0] + 6, mcp_xy[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 255), 1, cv2.LINE_AA)
+
+        # TIP_FINGER_MAP for ratio labels
+        tip_names = {THUMB_TIP: "Th", INDEX_TIP: "In", MIDDLE_TIP: "Mi",
+                     RING_TIP: "Ri", PINKY_TIP: "Pi"}
 
         for idx, _label, color in DISPLAY_POINTS:
             x, y = int(lms[idx].x * w), int(lms[idx].y * h)
@@ -239,8 +252,17 @@ class RockPaperScissorsAI:
             # Filled coloured dot
             cv2.circle(frame, (x, y), 9, color, -1, cv2.LINE_AA)
 
-        # Connect fingertips to wrist with thin lines
-        wrist_xy = (int(lms[WRIST].x * w), int(lms[WRIST].y * h))
+            # Show extension ratio next to each fingertip
+            if idx in self._ratios:
+                r = self._ratios[idx]
+                thresh = EXTENDED_RATIO.get(idx, 1.55)
+                up = r >= thresh
+                r_color = GREEN if up else RED
+                r_text = f"{r:.2f}"
+                cv2.putText(frame, r_text, (x + 16, y - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, r_color, 1, cv2.LINE_AA)
+
+        # Connect fingertips to wrist with thin guide lines
         for tip_idx in [THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]:
             tip_xy = (int(lms[tip_idx].x * w), int(lms[tip_idx].y * h))
             cv2.line(frame, wrist_xy, tip_xy, (100, 100, 100), 1, cv2.LINE_AA)
