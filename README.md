@@ -17,7 +17,8 @@
 │   ├── Dual-Hand-Volume-Controller/  #   Control system volume with hand gestures
 │   ├── Virtual-Blackboard/    #   Draw, erase, and idle on a digital canvas with hand gestures
 │   ├── Blink-Counter/         #   Count eye blinks using EAR (Eye Aspect Ratio) + Face Mesh
-│   └── Rock-Paper-Scissors-AI/  #   Play Rock-Paper-Scissors against the computer with hand gestures
+│   ├── Rock-Paper-Scissors-AI/  #   Play Rock-Paper-Scissors against the computer with hand gestures
+│   └── Jedi-Force-Push/     #   Thrust your palm toward the camera to unleash a shockwave
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
 ├── Books/                     # Reference books on CV, image processing, and graphics
 ├── Papers/                    # (coming) Paper reviews and implementations
@@ -39,6 +40,7 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 | [**Virtual Blackboard**](Sample%20Codes/Virtual-Blackboard/) | Write on a pure black digital canvas using your index finger. Raise both index and middle fingers to erase, or open your hand to pause drawing. | MediaPipe Hands, OpenCV, NumPy |
 | [**Blink Counter**](Sample%20Codes/Blink-Counter/) | Count your eye blinks in real time using the Eye Aspect Ratio (EAR) formula on Face Mesh landmarks. | MediaPipe Face Mesh, OpenCV |
 | [**Rock-Paper-Scissors AI**](Sample%20Codes/Rock-Paper-Scissors-AI/) | Play Rock-Paper-Scissors against the computer using hand gestures. Auto countdown, scoreboard, and real-time result. | MediaPipe Hands, OpenCV |
+| [**Jedi Force Push**](Sample%20Codes/Jedi-Force-Push/) | Thrust your palm toward the camera to trigger shockwave rings, sparks, and screen shake. | MediaPipe Hands, OpenCV |
 
 ### Shared Utilities (`Sample Codes/common/`)
 
