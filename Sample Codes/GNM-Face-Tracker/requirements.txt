@@ -1,4 +1,11 @@
+# GNM must be installed first from GitHub:
+#   git clone https://github.com/google/GNM.git
+#   cd GNM/gnm/shape && pip install -e .
+#
+# Then install these:
 opencv-python>=4.5
 mediapipe>=0.10.0
 numpy>=1.20
 scipy>=1.7
+absl-py
+etils
