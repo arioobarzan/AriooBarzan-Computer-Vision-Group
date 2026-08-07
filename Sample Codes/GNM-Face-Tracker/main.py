@@ -100,15 +100,20 @@ def procrustes_rigid(
 
 
 # ---------------------------------------------------------------------------
-# Fast mesh renderer (wireframe)
+# Fast flat-shaded mesh renderer
 # ---------------------------------------------------------------------------
 
 class FastMeshRenderer:
-    """Fast wireframe renderer for the GNM mesh.
+    """Flat-shaded mesh renderer with batched fillPoly for speed.
 
-    Projects vertices, sorts edges by depth, and draws wireframe lines.
-    Much faster than filled-polygon rasterisation for real-time use.
+    Renders the GNM mesh using per-face Lambertian shading, depth-sorted
+    in batches of similar colour to minimise fillPoly calls (~8 instead of
+    22K).  Flips the Y axis to account for the GNM coordinate system
+    (Y-up) vs OpenCV image space (Y-down).
     """
+
+    # Colour bins for batching
+    _NUM_BINS = 8
 
     def __init__(self, image_size=(IMAGE_WIDTH, IMAGE_HEIGHT), fov_y=45.0):
         self.width, self.height = image_size
@@ -125,16 +130,14 @@ class FastMeshRenderer:
         triangles: np.ndarray,
         rvec=None,
         tvec=None,
-        edge_count: int = 2500,
     ) -> np.ndarray:
-        """Render mesh as wireframe on dark background.
+        """Render the mesh with flat shading on a dark background.
 
         Args:
-            vertices: (V, 3) vertex positions.
+            vertices: (V, 3) vertex positions in GNM space (Y-up, Z-forward).
             triangles: (T, 3) triangle indices.
-            rvec: (3,) axis-angle rotation.
-            tvec: (3,) translation.
-            edge_count: Number of edges to draw (subsampled for speed).
+            rvec: (3,) axis-angle rotation vector.
+            tvec: (3,) translation vector.
 
         Returns:
             (H, W, 3) uint8 BGR image.
@@ -150,34 +153,70 @@ class FastMeshRenderer:
         z = cam[:, 2]
         z_safe = np.where(np.abs(z) < 1e-6, np.copysign(1e-6, z), z)
         u = fx * cam[:, 0] / z_safe + cx
-        v = fy * cam[:, 1] / z_safe + cy
+        # NEGATE Y — GNM has Y-up, OpenCV image has Y-down
+        v = fy * (-cam[:, 1]) / z_safe + cy
 
+        # --- Face normals (GNM space) ---
+        v0 = vertices[triangles[:, 0]]
+        v1 = vertices[triangles[:, 1]]
+        v2 = vertices[triangles[:, 2]]
+        f_norms = np.cross(v1 - v0, v2 - v0)
+        norms = np.linalg.norm(f_norms, axis=1, keepdims=True)
+        f_norms = f_norms / np.maximum(norms, 1e-8)
+
+        # Face normals in CAMERA space
+        fn_cam = f_norms @ rotmat.T
+
+        # Back-face culling mask
+        front_facing = fn_cam[:, 2] < 0
+
+        # --- Shading ---
+        light_dir = np.array([0.15, 0.25, 1.0])  # camera-space light
+        light_dir = light_dir / np.linalg.norm(light_dir)
+        lambert = np.clip(np.sum(fn_cam * light_dir, axis=1), 0.0, 1.0)
+        ambient = 0.25
+        shade = ambient + (1.0 - ambient) * lambert
+
+        # Base skin colour BGR
+        base = np.array([185, 145, 115], dtype=np.float32)
+        colours = np.clip(base * shade[:, None], 0, 255).astype(np.uint8)
+        # Convert each triangle's colour to a single integer key for binning
+        grey = (colours[:, 0].astype(np.int32) * 3
+                + colours[:, 1].astype(np.int32) * 7
+                + colours[:, 2].astype(np.int32) * 5) // 15
+
+        # --- Depth sorting ---
+        tri_z = z[triangles].mean(axis=1)
+
+        # --- Render ---
         img = np.full((self.height, self.width, 3), 40, dtype=np.uint8)
 
-        # Build edge list from triangles (unique edges)
-        edges = set()
-        for tri in triangles:
-            for a, b in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])]:
-                edges.add((min(a, b), max(a, b)))
+        # Bin triangles by depth and colour for batched fillPoly
+        # Sort by depth first
+        depth_order = np.argsort(-tri_z)  # far → near
 
-        edge_list = list(edges)
+        # Process in bins: partition depth_order into _NUM_BINS equal groups
+        # by grey level within each depth slice
+        bin_size = max(1, len(depth_order) // (self._NUM_BINS * 2))
+        for batch_start in range(0, len(depth_order), bin_size):
+            batch_end = min(batch_start + bin_size, len(depth_order))
+            batch = depth_order[batch_start:batch_end]
 
-        # Compute midpoint depth for each edge
-        edge_depth = np.array([(z[a] + z[b]) / 2 for a, b in edge_list])
-
-        # Sort farthest → nearest and subsample
-        order = np.argsort(-edge_depth)
-        step = max(1, len(order) // edge_count)
-        order = order[::step][:edge_count]
-
-        for idx in order:
-            a, b = edge_list[idx]
-            pt1 = (int(u[a]), int(v[a]))
-            pt2 = (int(u[b]), int(v[b]))
-            # Depth-based colour (closer = brighter green)
-            depth = edge_depth[idx]
-            intensity = int(np.clip(255 - depth * 30, 60, 255))
-            cv2.line(img, pt1, pt2, (0, intensity, 0), 1)
+            # Group by colour within this batch
+            batch_grey = grey[batch]
+            # Use all triangles in one fillPoly call per distinct grey bin
+            unique_greys = np.unique(batch_grey)
+            for g in unique_greys:
+                mask = batch_grey == g
+                idxs = batch[mask]
+                # Filter for front-facing
+                idxs = idxs[front_facing[idxs]]
+                if len(idxs) == 0:
+                    continue
+                pts = np.stack([u[triangles[idxs]], v[triangles[idxs]]], axis=2)
+                pts = pts.astype(np.int32)
+                color = tuple(int(c) for c in colours[idxs[0]])
+                cv2.fillPoly(img, pts, color)
 
         return img
 
@@ -201,6 +240,7 @@ class GNMFaceTracker:
         self._lm_weights_cache: Optional[np.ndarray] = None
         self._num_cached_lm: int = 0
         self._fallback_landmark_vertex_indices: np.ndarray | None = None
+        self._skin_triangles: Optional[np.ndarray] = None
 
         self._show_fullscreen_gnm = False
         self._fps_window: list[float] = []
@@ -230,6 +270,11 @@ class GNMFaceTracker:
             )
             print(f"[GNM] V={self.gnm.num_vertices}  "
                   f"I={self.gnm.identity_dim}  E={self.gnm.expression_dim}")
+
+            # Pre-extract skin exterior triangles for rendering
+            skin_idx = self.gnm.triangle_indices_for_group("skin_exterior")
+            self._skin_triangles = self.gnm.triangles[skin_idx]
+            print(f"[GNM] Skin triangles: {len(self._skin_triangles)}")
 
             try:
                 lm_config = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
@@ -655,8 +700,10 @@ class GNMFaceTracker:
                         px, py = int(lm.x * w), int(lm.y * h)
                         cv2.circle(display_left, (px, py), 1, (0, 220, 0), -1)
 
-                    # Right: GNM wireframe
-                    display_right = renderer.render(vertices, self.gnm.triangles)
+                    # Right: GNM flat-shaded mesh (skin exterior only)
+                    display_right = renderer.render(
+                        vertices, self._skin_triangles
+                    )
 
                     # Expression magnitude indicator
                     expr_mag = float(np.abs(self.expression).mean())
