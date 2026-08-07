@@ -5,12 +5,11 @@ GNM Face Tracker — Real-time face tracking with Google's GNM parametric head m
 Uses MediaPipe Face Landmarker (Tasks API) for real-time landmark detection and
 GNM for 3D face reconstruction.  The pipeline has two stages:
 
-1. **Identity Fit** — The user sits with a neutral expression.  We optimise
-   GNM's 253 identity parameters so the model's 68 standard landmarks match
-   the user's MediaPipe-tracked landmarks.
+1. **Identity Fit** — Auto-captures a neutral face in the first 2 seconds,
+   then optimises GNM's 253 identity parameters via L-BFGS-B.
 
-2. **Real-time Tracking** — Each frame we estimate the 383 expression
-   parameters from live landmarks and generate the deformed GNM mesh.
+2. **Real-time Tracking** — Each frame estimates the 383 expression parameters
+   from live landmarks and renders the deformed GNM mesh.
 
 Press 'q' to quit | 'r' to re-fit identity | 'f' to toggle fullscreen GNM view.
 """
@@ -55,67 +54,40 @@ NUM_MP_LANDMARKS = 478
 # ---------------------------------------------------------------------------
 # MediaPipe → iBUG 68 mapping
 # ---------------------------------------------------------------------------
-# Maps the 68 standard iBUG facial landmarks to MediaPipe Face Mesh indices.
-# MediaPipe Face Landmarker outputs 478 landmarks (468 + 10 iris).
-#
-# iBUG 68 layout:
-#   0-16  : Jawline (17 pts)      17-21 : Right eyebrow (5 pts)
-#   22-26 : Left eyebrow (5 pts)  27-30 : Nose bridge (4 pts)
-#   31-35 : Nose bottom (5 pts)   36-41 : Right eye (6 pts)
-#   42-47 : Left eye (6 pts)      48-59 : Outer mouth (12 pts)
-#   60-67 : Inner mouth (8 pts)
-# ---------------------------------------------------------------------------
-
 IBUG68_TO_MEDIAPIPE: dict[int, int] = {
-    # Jawline
     0: 234, 1: 93, 2: 132, 3: 58, 4: 172, 5: 136, 6: 150,
     7: 176, 8: 148, 9: 152, 10: 377, 11: 400, 12: 378, 13: 379,
     14: 365, 15: 397, 16: 288,
-    # Right eyebrow
     17: 70, 18: 63, 19: 105, 20: 66, 21: 107,
-    # Left eyebrow
     22: 336, 23: 296, 24: 334, 25: 293, 26: 300,
-    # Nose bridge
     27: 168, 28: 6, 29: 197, 30: 195,
-    # Nose bottom
     31: 5, 32: 4, 33: 1, 34: 19, 35: 94,
-    # Right eye
     36: 33, 37: 246, 38: 161, 39: 160, 40: 159, 41: 158,
-    # Left eye
     42: 362, 43: 398, 44: 384, 45: 385, 46: 386, 47: 387,
-    # Outer mouth
     48: 61, 49: 185, 50: 40, 51: 39, 52: 37, 53: 0,
     54: 267, 55: 269, 56: 270, 57: 409, 58: 291, 59: 308,
-    # Inner mouth
     60: 415, 61: 310, 62: 311, 63: 312, 64: 13, 65: 82, 66: 81, 67: 80,
 }
 
 
 # ---------------------------------------------------------------------------
-# Helper: Procrustes similarity alignment
+# Procrustes alignment (rigid only — no scale)
 # ---------------------------------------------------------------------------
 
-def procrustes_align(
-    source: np.ndarray,
-    target: np.ndarray,
-    use_scaling: bool = True,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Align *source* to *target* via rotation, translation, and optional scale.
+def procrustes_rigid(
+    source: np.ndarray, target: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Align *source* to *target* via rotation + translation (no scale).
 
-    Args:
-        source: (N, 3) points to align.
-        target: (N, 3) reference points.
-        use_scaling: If True, estimate uniform scale.
-
-    Returns:
-        (aligned_source, rotation_matrix, scale)
+    Using scale would absorb expression changes — rigid alignment preserves
+    the scale difference between MP space and GNM space, which is handled
+    by the expression regressor.
     """
-    src_centroid = source.mean(axis=0)
-    tgt_centroid = target.mean(axis=0)
-    src_centered = source - src_centroid
-    tgt_centered = target - tgt_centroid
+    src_c = source.mean(axis=0)
+    tgt_c = target.mean(axis=0)
+    src_centered = source - src_c
+    tgt_centered = target - tgt_c
 
-    # Optimal rotation via SVD (Kabsch-Umeyama)
     h = src_centered.T @ tgt_centered
     u, _, vt = np.linalg.svd(h)
     r = vt.T @ u.T
@@ -123,70 +95,46 @@ def procrustes_align(
         vt[-1, :] *= -1
         r = vt.T @ u.T
 
-    if use_scaling:
-        num = np.sum(tgt_centered * (src_centered @ r))
-        den = np.sum(src_centered ** 2)
-        scale = num / max(den, 1e-12)
-    else:
-        scale = 1.0
-
-    aligned = scale * (source - src_centroid) @ r + tgt_centroid
-    return aligned, r, scale
+    aligned = (source - src_c) @ r + tgt_c
+    return aligned, r
 
 
 # ---------------------------------------------------------------------------
-# Simple mesh renderer (software rasteriser)
+# Fast mesh renderer (wireframe)
 # ---------------------------------------------------------------------------
 
-class SimpleMeshRenderer:
-    """Software rasteriser for rendering the GNM mesh to a BGR image.
+class FastMeshRenderer:
+    """Fast wireframe renderer for the GNM mesh.
 
-    Uses flat shading with per-face normals and depth-sorted triangle
-    rasterisation via OpenCV's fillPoly — fast enough for real-time use.
+    Projects vertices, sorts edges by depth, and draws wireframe lines.
+    Much faster than filled-polygon rasterisation for real-time use.
     """
 
-    def __init__(
-        self,
-        image_size: tuple[int, int] = (IMAGE_WIDTH, IMAGE_HEIGHT),
-        fov_y: float = 45.0,
-    ):
+    def __init__(self, image_size=(IMAGE_WIDTH, IMAGE_HEIGHT), fov_y=45.0):
         self.width, self.height = image_size
         fov_rad = np.radians(fov_y)
         fx = self.width / (2.0 * np.tan(fov_rad / 2.0))
-        fy = fx
-        cx = self.width / 2.0
-        cy = self.height / 2.0
-        self.K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-
-    def _project(
-        self, vertices: np.ndarray, rvec: np.ndarray, tvec: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Project vertices.  Returns (u, v, depth, cam_points)."""
-        rotmat, _ = cv2.Rodrigues(rvec)
-        cam = vertices @ rotmat.T + tvec.reshape(1, 3)
-        fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
-        z = cam[:, 2]
-        z_safe = np.where(np.abs(z) < 1e-6, np.copysign(1e-6, z), z)
-        u = fx * cam[:, 0] / z_safe + cx
-        v = fy * cam[:, 1] / z_safe + cy
-        return u, v, z_safe, cam
+        self.K = np.array(
+            [[fx, 0, self.width / 2], [0, fx, self.height / 2], [0, 0, 1]],
+            dtype=np.float32,
+        )
 
     def render(
         self,
         vertices: np.ndarray,
         triangles: np.ndarray,
-        vertex_normals: np.ndarray | None = None,
-        rvec: np.ndarray | None = None,
-        tvec: np.ndarray | None = None,
+        rvec=None,
+        tvec=None,
+        edge_count: int = 2500,
     ) -> np.ndarray:
-        """Render the mesh to a BGR image using flat shading.
+        """Render mesh as wireframe on dark background.
 
         Args:
             vertices: (V, 3) vertex positions.
             triangles: (T, 3) triangle indices.
-            vertex_normals: (V, 3) per-vertex normals (unused — computed from faces).
             rvec: (3,) axis-angle rotation.
             tvec: (3,) translation.
+            edge_count: Number of edges to draw (subsampled for speed).
 
         Returns:
             (H, W, 3) uint8 BGR image.
@@ -196,47 +144,40 @@ class SimpleMeshRenderer:
         if tvec is None:
             tvec = np.array([0.0, 0.05, 1.8], dtype=np.float32)
 
-        u, v, z, cam = self._project(vertices, rvec, tvec)
-        img = np.full((self.height, self.width, 3), 230, dtype=np.uint8)
         rotmat, _ = cv2.Rodrigues(rvec)
+        cam = vertices @ rotmat.T + tvec.reshape(1, 3)
+        fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
+        z = cam[:, 2]
+        z_safe = np.where(np.abs(z) < 1e-6, np.copysign(1e-6, z), z)
+        u = fx * cam[:, 0] / z_safe + cx
+        v = fy * cam[:, 1] / z_safe + cy
 
-        light_dir = np.array([0.15, -0.25, 0.95])
-        light_dir = light_dir / np.linalg.norm(light_dir)
+        img = np.full((self.height, self.width, 3), 40, dtype=np.uint8)
 
-        base = np.array([185, 145, 115], dtype=np.float32)
-        ambient = 0.3
+        # Build edge list from triangles (unique edges)
+        edges = set()
+        for tri in triangles:
+            for a, b in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])]:
+                edges.add((min(a, b), max(a, b)))
 
-        T = len(triangles)
+        edge_list = list(edges)
 
-        # Face normals
-        v0 = vertices[triangles[:, 0]]
-        v1 = vertices[triangles[:, 1]]
-        v2 = vertices[triangles[:, 2]]
-        face_normals = np.cross(v1 - v0, v2 - v0)
-        norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
-        face_normals = face_normals / np.maximum(norms, 1e-8)
+        # Compute midpoint depth for each edge
+        edge_depth = np.array([(z[a] + z[b]) / 2 for a, b in edge_list])
 
-        # Camera-space normals + shading
-        fn_cam = face_normals @ rotmat.T
-        lambert = np.clip(np.dot(fn_cam, light_dir), 0.0, 1.0)
-        shade = ambient + (1.0 - ambient) * lambert
+        # Sort farthest → nearest and subsample
+        order = np.argsort(-edge_depth)
+        step = max(1, len(order) // edge_count)
+        order = order[::step][:edge_count]
 
-        tri_depth = z[triangles].mean(axis=1)
-        tri_colours = np.clip(base * shade[:, None], 0, 255).astype(np.uint8)
-
-        # Painter's algorithm
-        order = np.argsort(-tri_depth)
-
-        for tri_idx in order:
-            tri = triangles[tri_idx]
-            pts = np.stack([u[tri], v[tri]], axis=1).astype(np.int32)
-            if (pts[:, 0].min() >= self.width or pts[:, 0].max() < 0 or
-                    pts[:, 1].min() >= self.height or pts[:, 1].max() < 0):
-                continue
-            if fn_cam[tri_idx, 2] >= 0:  # back-face culling
-                continue
-            colour = tuple(int(c) for c in tri_colours[tri_idx])
-            cv2.fillPoly(img, [pts], colour)
+        for idx in order:
+            a, b = edge_list[idx]
+            pt1 = (int(u[a]), int(v[a]))
+            pt2 = (int(u[b]), int(v[b]))
+            # Depth-based colour (closer = brighter green)
+            depth = edge_depth[idx]
+            intensity = int(np.clip(255 - depth * 30, 60, 255))
+            cv2.line(img, pt1, pt2, (0, intensity, 0), 1)
 
         return img
 
@@ -246,52 +187,40 @@ class SimpleMeshRenderer:
 # ---------------------------------------------------------------------------
 
 class GNMFaceTracker:
-    """Real-time face tracking with GNM.
-
-    Usage::
-
-        tracker = GNMFaceTracker()
-        tracker.run()
-    """
+    """Real-time face tracking with GNM."""
 
     def __init__(self):
         self.gnm = None
         self.detector: Optional[FaceLandmarker] = None
-        self.identity: Optional[np.ndarray] = None   # (253,)
-        self.expression: Optional[np.ndarray] = None  # (383,)
+        self.identity: Optional[np.ndarray] = None
+        self.expression: Optional[np.ndarray] = None
 
-        # GNM 68-landmark 3D positions on the template mesh
-        self._gnm68_template: Optional[np.ndarray] = None  # (68, 3)
-
-        # Pre-computed regressor: residual → expression params
-        self._expr_regressor: Optional[np.ndarray] = None  # (E, N*3)
-
-        # Cached landmark definitions from GNM
+        self._gnm68_template: Optional[np.ndarray] = None
+        self._expr_regressor: Optional[np.ndarray] = None
         self._lm_indices_cache: Optional[np.ndarray] = None
         self._lm_weights_cache: Optional[np.ndarray] = None
         self._num_cached_lm: int = 0
-
-        # Fallback
         self._fallback_landmark_vertex_indices: np.ndarray | None = None
 
-        # State
         self._show_fullscreen_gnm = False
         self._fps_window: list[float] = []
         self._fps = 0.0
-        self._frame_idx: int = 0
+
+        # Stabilise expression with temporal smoothing
+        self._expr_smooth: Optional[np.ndarray] = None
+        self._expr_alpha = 0.55  # smoothing factor
 
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
     def _load_gnm(self) -> bool:
-        """Load GNM and extract the 68 landmark positions."""
-        print("[GNM] Loading GNM Head model ...")
+        """Load GNM and the 68 sparse landmarks."""
+        print("[GNM] Loading ...")
         try:
             from gnm.shape import gnm_numpy
             from gnm.shape.gnm_landmarks import (
-                GNMLandmarksType,
-                load_landmarks,
+                GNMLandmarksType, load_landmarks,
             )
             from gnm.shape.gnm_landmarks import GNMLandmarksDataNotLinkedError
 
@@ -299,65 +228,49 @@ class GNMFaceTracker:
                 version=gnm_numpy.GNMMajorVersion.V3,
                 variant=gnm_numpy.GNMVariant.HEAD,
             )
-            print(f"[GNM] Loaded.  V={self.gnm.num_vertices}  "
+            print(f"[GNM] V={self.gnm.num_vertices}  "
                   f"I={self.gnm.identity_dim}  E={self.gnm.expression_dim}")
 
-            print("[GNM] Loading HEAD_SPARSE_68 landmarks ...")
             try:
-                landmarks_config = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
-                self._extract_68_landmark_positions(landmarks_config)
-                print(f"[GNM] 68 landmark positions extracted "
-                      f"({len(self._gnm68_template)} points).")
+                lm_config = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
+                self._extract_68_landmark_positions(lm_config)
+                print(f"[GNM] {len(self._gnm68_template)} landmarks loaded.")
             except GNMLandmarksDataNotLinkedError:
-                print("[GNM] WARNING: Landmark data not linked.  "
-                      "Using fallback vertex indices.")
                 self._use_fallback_landmarks()
 
             return True
-
         except ImportError as e:
             print(f"[GNM] ERROR: {e}")
-            print("  To install GNM:")
-            print("    git clone https://github.com/google/GNM.git")
-            print("    cd GNM/gnm/shape && pip install -e .")
-            return False
-        except Exception as e:
-            print(f"[GNM] ERROR loading model: {e}")
+            print("  git clone https://github.com/google/GNM.git")
+            print("  cd GNM/gnm/shape && pip install -e .")
             return False
 
-    def _extract_68_landmark_positions(self, landmarks_config) -> None:
-        """Compute 3D positions of the 68 landmarks on the GNM template."""
-        indices = landmarks_config.indices   # (68, K)
-        weights = landmarks_config.weights   # (68, K)
-        template = self.gnm.template_vertex_positions  # (V, 3)
-
-        num_lm, num_pairs = indices.shape
+    def _extract_68_landmark_positions(self, lm_config) -> None:
+        indices = lm_config.indices
+        weights = lm_config.weights
+        template = self.gnm.template_vertex_positions
+        num_lm, K = indices.shape
         positions = np.zeros((num_lm, 3), dtype=np.float32)
         for i in range(num_lm):
-            pos = np.zeros(3, dtype=np.float32)
-            for j in range(num_pairs):
-                vtx_idx = indices[i, j]
+            for j in range(K):
+                idx = indices[i, j]
                 w = weights[i, j]
-                if w > 0 and vtx_idx >= 0:
-                    pos += w * template[vtx_idx]
-            positions[i] = pos
+                if w > 0 and idx >= 0:
+                    positions[i] += w * template[idx]
         self._gnm68_template = positions
 
     def _use_fallback_landmarks(self) -> None:
-        """Use extreme vertices as approximate landmarks."""
         template = self.gnm.template_vertex_positions
         centroid = template.mean(axis=0)
         dists = np.linalg.norm(template - centroid, axis=1)
-        extreme_indices = np.argsort(-dists)[:68]
-        extreme_indices = np.sort(extreme_indices)
-        self._gnm68_template = template[extreme_indices]
-        self._fallback_landmark_vertex_indices = extreme_indices
-        print(f"[GNM] Using {len(extreme_indices)} extreme vertices as "
-              f"fallback landmarks.")
+        idx = np.sort(np.argsort(-dists)[:68])
+        self._gnm68_template = template[idx]
+        self._fallback_landmark_vertex_indices = idx
+        print(f"[GNM] Fallback: {len(idx)} extreme vertices.")
 
     def _setup_mediapipe(self):
-        """Initialise MediaPipe Face Landmarker (Tasks API)."""
-        print("[MediaPipe] Initialising Face Landmarker ...")
+        """Initialise MediaPipe Face Landmarker."""
+        print("[MediaPipe] Initialising ...")
         options = FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=MODEL_PATH),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
@@ -369,36 +282,27 @@ class GNMFaceTracker:
         )
         self.detector = FaceLandmarker.create_from_options(options)
 
-    def _extract_landmarks_3d(self, face_landmarks) -> np.ndarray:
-        """Convert MediaPipe face landmarks to (478, 3) numpy array.
-
-        Args:
-            face_landmarks: List of NormalizedLandmark objects.
-
-        Returns:
-            (N, 3) array of (x, y, z) coordinates.
-        """
-        return np.array(
-            [[lm.x, lm.y, lm.z] for lm in face_landmarks], dtype=np.float32
-        )
-
     # ------------------------------------------------------------------
-    # Identity fitting
+    # Identity fitting (auto-capture)
     # ------------------------------------------------------------------
 
-    def fit_identity_interactive(self) -> bool:
-        """Interactive identity fitting via webcam capture.
+    def _auto_fit_identity(self) -> bool:
+        """Auto-capture and fit identity from the first stable face.
 
-        Press SPACE to capture a neutral frame; 'q' to skip.
+        Waits up to 3 seconds for a face.  Once detected, waits for the
+        landmarks to stabilise (low frame-to-frame variance), then captures
+        and optimises identity.
         """
         print("\n" + "=" * 60)
-        print("  Identity Fit")
+        print("  Identity Fit — auto-capturing neutral face ...")
         print("=" * 60)
-        print("  Look straight at the camera with a NEUTRAL expression.")
-        print("  Press SPACE to capture  |  'q' to skip\n")
 
         with WebcamManager(width=IMAGE_WIDTH, height=IMAGE_HEIGHT) as cam:
+            prev_lm = None
+            stable_count = 0
+            start_time = time.time()
             captured_lm = None
+
             while True:
                 success, frame = cam.read()
                 if not success:
@@ -408,59 +312,83 @@ class GNMFaceTracker:
                 h, w = frame.shape[:2]
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                timestamp = int(time.time() * 1000)
-                result = self.detector.detect_for_video(mp_image, timestamp)
+                ts = int(time.time() * 1000)
+                result = self.detector.detect_for_video(mp_image, ts)
 
-                has_face = bool(result.face_landmarks)
-                status = "Face: DETECTED" if has_face else "Face: --"
-                colour = (0, 255, 0) if has_face else (0, 0, 255)
-                cv2.putText(display, status, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
-                cv2.putText(display, "SPACE = capture  |  q = skip",
-                            (20, h - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
+                elapsed = time.time() - start_time
 
-                # Draw face mesh dots
-                if has_face:
-                    for lm in result.face_landmarks[0]:
+                if result.face_landmarks:
+                    face_lm = result.face_landmarks[0]
+                    lm_3d = np.array(
+                        [[p.x, p.y, p.z] for p in face_lm], dtype=np.float32
+                    )
+
+                    # Check stability
+                    if prev_lm is not None:
+                        diff = np.abs(lm_3d - prev_lm).mean()
+                        if diff < 0.003:  # stable
+                            stable_count += 1
+                        else:
+                            stable_count = max(0, stable_count - 1)
+
+                    prev_lm = lm_3d.copy()
+
+                    # Draw landmarks on display
+                    for lm in face_lm:
                         px, py = int(lm.x * w), int(lm.y * h)
                         cv2.circle(display, (px, py), 1, (0, 220, 0), -1)
 
+                    # Status
+                    if stable_count >= 8:
+                        captured_lm = lm_3d
+                        status = "CAPTURED!"
+                        colour = (0, 255, 255)
+                    elif stable_count > 0:
+                        status = f"Hold still... {stable_count}/8"
+                        colour = (0, 255, 200)
+                    else:
+                        status = f"Face detected — hold neutral ({elapsed:.0f}s)"
+                        colour = (0, 200, 0)
+                else:
+                    status = "Looking for face..."
+                    colour = (0, 0, 255)
+                    stable_count = 0
+
+                cv2.putText(display, status, (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
+                cv2.putText(display, "q = skip | auto-capture when stable",
+                            (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (150, 150, 150), 1)
                 cv2.imshow("Identity Fit", display)
 
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord(" ") and has_face:
-                    captured_lm = self._extract_landmarks_3d(
-                        result.face_landmarks[0]
-                    )
-                    print(f"[Identity Fit] Frame captured "
-                          f"({len(captured_lm)} landmarks).  Optimising ...")
+                if captured_lm is not None or key == ord("q"):
                     break
-                elif key == ord("q"):
+
+                # Timeout after 5 seconds with no face
+                if elapsed > 5 and stable_count == 0:
                     break
 
         cv2.destroyWindow("Identity Fit")
 
         if captured_lm is None:
-            print("[Identity Fit] Skipped — no frame captured.")
+            print("[Identity Fit] Skipped.")
             return False
 
+        print("[Identity Fit] Optimising identity parameters ...")
         self.identity = self._optimise_identity(captured_lm)
         self._build_expression_regressor()
         return True
 
+    # ------------------------------------------------------------------
+    # Identity optimisation
+    # ------------------------------------------------------------------
+
     def _optimise_identity(self, mp_landmarks_3d: np.ndarray) -> np.ndarray:
-        """Optimise GNM identity parameters to match the user's landmarks.
-
-        Works in GNM space: converts MediaPipe landmarks via a similarity
-        transform, then optimises the 253 identity coefficients.
-
-        Iterates 3 times because the similarity transform and identity
-        parameters are coupled.
-        """
+        """Optimise 253 identity parameters via iterative L-BFGS-B."""
         template_68 = self._gnm68_template.astype(np.float64)
 
-        # Gather user's corresponding 68 landmarks in MP space
+        # Gather user 68 landmarks in MP space
         user_68_mp = np.zeros((68, 3), dtype=np.float64)
         for ibug_idx, mp_idx in IBUG68_TO_MEDIAPIPE.items():
             if mp_idx < len(mp_landmarks_3d):
@@ -469,11 +397,9 @@ class GNMFaceTracker:
         id_basis = self.gnm.vertex_identity_basis.astype(np.float64)
         template_v = self.gnm.template_vertex_positions.astype(np.float64)
 
-        # Load landmark vertex indices and weights
         try:
             from gnm.shape.gnm_landmarks import (
-                GNMLandmarksType,
-                load_landmarks,
+                GNMLandmarksType, load_landmarks,
             )
             lm_config = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
             lm_indices = lm_config.indices.astype(np.int32)
@@ -487,7 +413,7 @@ class GNMFaceTracker:
 
         num_lm = lm_indices.shape[0]
 
-        # Template landmark positions in GNM space: (num_lm, 3)
+        # Template landmarks in GNM space
         template_lm = np.zeros((num_lm, 3), dtype=np.float64)
         for i in range(num_lm):
             for j in range(lm_indices.shape[1]):
@@ -496,7 +422,7 @@ class GNMFaceTracker:
                 if w > 0 and idx >= 0:
                     template_lm[i] += w * template_v[idx]
 
-        # Landmark identity basis: (I, num_lm, 3)
+        # Landmark identity basis: (253, num_lm, 3)
         lm_id_basis = np.zeros((253, num_lm, 3), dtype=np.float64)
         for i in range(num_lm):
             for j in range(lm_indices.shape[1]):
@@ -505,64 +431,51 @@ class GNMFaceTracker:
                 if w > 0 and idx >= 0:
                     lm_id_basis[:, i, :] += w * id_basis[:, idx, :]
 
-        # --- Iterative fitting ---
         identity = np.zeros(253, dtype=np.float64)
 
         for iteration in range(3):
             current_lm = template_lm + np.einsum(
                 "i,ivm->vm", identity, lm_id_basis
             )
-
-            # Estimate similarity transform: MP → GNM space
-            user_aligned, rot, scale = procrustes_align(
-                user_68_mp, current_lm, use_scaling=True
+            # Use similarity (with scale) for identity fit — this is correct
+            # because we WANT to absorb the overall MP→GNM scale difference
+            # into the transform, not into identity params
+            user_aligned, rot, scale = _procrustes_similarity(
+                user_68_mp, current_lm
             )
-
-            # Transform user landmarks to GNM space
             user_in_gnm = scale * (user_68_mp - user_68_mp.mean(axis=0)) @ rot
             user_in_gnm += current_lm.mean(axis=0)
             target = user_in_gnm.astype(np.float64)
 
-            def loss(id_vec: np.ndarray) -> float:
-                predicted = template_lm + np.einsum(
-                    "i,ivm->vm", id_vec, lm_id_basis
-                )
-                diff = predicted - target
-                reg = 0.0005 * np.sum(id_vec ** 2)
-                return float(np.sum(diff ** 2) + reg)
+            def loss(v):
+                p = template_lm + np.einsum("i,ivm->vm", v, lm_id_basis)
+                return float(np.sum((p - target) ** 2) + 0.0005 * np.sum(v ** 2))
 
-            def grad(id_vec: np.ndarray) -> np.ndarray:
-                predicted = template_lm + np.einsum(
-                    "i,ivm->vm", id_vec, lm_id_basis
-                )
-                diff = (predicted - target).ravel()
-                jac = lm_id_basis.reshape(253, -1)
-                return (2.0 * jac @ diff + 2.0 * 0.0005 * id_vec).astype(np.float64)
+            def grad(v):
+                p = template_lm + np.einsum("i,ivm->vm", v, lm_id_basis)
+                d = (p - target).ravel()
+                j = lm_id_basis.reshape(253, -1)
+                return (2 * j @ d + 2 * 0.0005 * v).astype(np.float64)
 
             result = minimize(
-                loss,
-                x0=identity,
-                jac=grad,
-                method="L-BFGS-B",
-                options={"maxiter": 100, "disp": False},
+                loss, x0=identity, jac=grad, method="L-BFGS-B",
+                options={"maxiter": 80},
             )
             identity = result.x.copy()
-            print(f"  [Fit iter {iteration + 1}] loss={loss(identity):.4f}  "
-                  f"scale={scale:.4f}")
+            print(f"  Iter {iteration + 1}: loss={loss(identity):.4f}")
 
         print(f"[Identity Fit] Done.  Final loss={loss(identity):.4f}")
         return identity.astype(np.float32)
 
-    def _build_expression_regressor(self) -> None:
-        """Pre-compute the expression regressor matrix.
+    # ------------------------------------------------------------------
+    # Expression regressor
+    # ------------------------------------------------------------------
 
-        Builds M: (E, N*3) such that  expression = M @ residual_flat.
-        Solves:  min ||E@expr - residual||² + λ||expr||²
-        """
+    def _build_expression_regressor(self) -> None:
+        """Pre-compute expression regressor matrix."""
         try:
             from gnm.shape.gnm_landmarks import (
-                GNMLandmarksType,
-                load_landmarks,
+                GNMLandmarksType, load_landmarks,
             )
             lm_config = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
             lm_indices = lm_config.indices.astype(np.int32)
@@ -578,7 +491,6 @@ class GNMFaceTracker:
         expr_basis = self.gnm.expression_basis.astype(np.float64)
         E_dim = self.gnm.expression_dim
 
-        # Expression basis at each landmark: (E, num_lm, 3)
         lm_expr_basis = np.zeros((E_dim, num_lm, 3), dtype=np.float64)
         for i in range(num_lm):
             for j in range(lm_indices.shape[1]):
@@ -587,37 +499,35 @@ class GNMFaceTracker:
                 if w > 0 and idx >= 0:
                     lm_expr_basis[:, i, :] += w * expr_basis[:, idx, :]
 
-        jac = lm_expr_basis.reshape(E_dim, -1).T  # (num_lm*3, E)
+        jac = lm_expr_basis.reshape(E_dim, -1).T
         reg = 0.005
         lhs = jac.T @ jac + reg * np.eye(E_dim)
         self._expr_regressor = np.linalg.solve(lhs, jac.T).astype(np.float32)
-        print(f"[GNM] Expression regressor ready: {self._expr_regressor.shape}")
-
         self._lm_indices_cache = lm_indices
         self._lm_weights_cache = lm_weights
         self._num_cached_lm = num_lm
+        print(f"[GNM] Regressor: {self._expr_regressor.shape}")
 
     # ------------------------------------------------------------------
     # Per-frame expression estimation
     # ------------------------------------------------------------------
 
     def estimate_expression(self, mp_landmarks_3d: np.ndarray) -> np.ndarray:
-        """Estimate expression parameters from one frame of landmarks.
+        """Estimate expression from MP landmarks.
 
-        Converts to GNM space via similarity transform, subtracts identity
-        contribution, solves via pre-computed regressor.
+        Uses rigid-only Procrustes (no scale) to preserve expression
+        changes.  The MP→GNM scale is already baked into the regressor.
         """
         if (self.identity is None or self._expr_regressor is None
                 or self._lm_indices_cache is None):
             return np.zeros(self.gnm.expression_dim, dtype=np.float32)
 
-        # Gather user 68 landmarks in MP space
         user_68_mp = np.zeros((68, 3), dtype=np.float64)
         for ibug_idx, mp_idx in IBUG68_TO_MEDIAPIPE.items():
             if mp_idx < len(mp_landmarks_3d):
                 user_68_mp[ibug_idx] = mp_landmarks_3d[mp_idx]
 
-        # Identity-contributed landmark positions in GNM space
+        # Compute identity landmarks in GNM space
         template_v = self.gnm.template_vertex_positions.astype(np.float64)
         id_basis = self.gnm.vertex_identity_basis.astype(np.float64)
         identity_d = self.identity.astype(np.float64)
@@ -634,15 +544,24 @@ class GNMFaceTracker:
                     )
                     id_lm_gnm[i] += w * pos
 
-        # Align MP landmarks → GNM space
-        user_aligned_gnm, _, _ = procrustes_align(
-            user_68_mp, id_lm_gnm, use_scaling=True
-        )
+        # RIGID alignment (rotation + translation only — NO scale)
+        # This preserves expression changes that would otherwise be absorbed
+        # by scale adjustment
+        user_aligned_gnm, _ = procrustes_rigid(user_68_mp, id_lm_gnm)
 
-        # Residual → expression
         residual = user_aligned_gnm - id_lm_gnm
-        expr = self._expr_regressor @ residual.ravel().astype(np.float32)
-        return expr.astype(np.float32)
+        expr_raw = self._expr_regressor @ residual.ravel().astype(np.float32)
+
+        # Temporal smoothing to reduce jitter
+        if self._expr_smooth is None:
+            self._expr_smooth = expr_raw.copy()
+        else:
+            self._expr_smooth = (
+                self._expr_alpha * self._expr_smooth
+                + (1 - self._expr_alpha) * expr_raw
+            )
+
+        return self._expr_smooth.copy()
 
     # ------------------------------------------------------------------
     # GNM forward pass
@@ -653,10 +572,11 @@ class GNMFaceTracker:
         identity: np.ndarray | None = None,
         expression: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Generate the GNM head mesh for given (or stored) parameters."""
         if identity is None:
-            identity = self.identity if self.identity is not None else np.zeros(
-                self.gnm.identity_dim, dtype=np.float32
+            identity = (
+                self.identity
+                if self.identity is not None
+                else np.zeros(self.gnm.identity_dim, dtype=np.float32)
             )
         if expression is None:
             expression = (
@@ -673,51 +593,31 @@ class GNMFaceTracker:
         )
 
     # ------------------------------------------------------------------
-    # Drawing helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _draw_landmarks(
-        frame: np.ndarray,
-        face_landmarks,
-        colour: tuple[int, int, int] = (0, 220, 0),
-        radius: int = 1,
-    ) -> None:
-        """Draw face landmark dots on the frame."""
-        h, w = frame.shape[:2]
-        for lm in face_landmarks:
-            px, py = int(lm.x * w), int(lm.y * h)
-            cv2.circle(frame, (px, py), radius, colour, -1)
-
-    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Run the full GNM face-tracking application."""
-        # --- Load GNM ---
+        """Run the full face-tracking application."""
         if not self._load_gnm():
             return
 
-        # --- Setup MediaPipe ---
         self._setup_mediapipe()
 
-        # --- Identity Fit ---
-        if not self.fit_identity_interactive():
-            print("[WARNING] Using template (zero) identity.")
+        # Identity fit (auto-capture)
+        if not self._auto_fit_identity():
+            print("[WARNING] Using template identity.")
             self.identity = np.zeros(self.gnm.identity_dim, dtype=np.float32)
             self._build_expression_regressor()
 
         self.expression = np.zeros(self.gnm.expression_dim, dtype=np.float32)
+        self._expr_smooth = None
 
-        # --- Real-time loop ---
         print("\n" + "=" * 60)
         print("  Real-time Tracking")
         print("=" * 60)
-        print("  'q' = quit  |  'r' = re-fit identity  "
-              "|  'f' = toggle GNM view\n")
+        print("  'q' = quit  |  'r' = re-fit  |  'f' = GNM fullscreen\n")
 
-        renderer = SimpleMeshRenderer()
+        renderer = FastMeshRenderer()
         t_last = time.time()
         need_refit = False
 
@@ -729,54 +629,62 @@ class GNMFaceTracker:
 
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                timestamp = int(time.time() * 1000)
-                result = self.detector.detect_for_video(mp_image, timestamp)
+                ts = int(time.time() * 1000)
+                result = self.detector.detect_for_video(mp_image, ts)
 
                 if result.face_landmarks:
                     face_lm = result.face_landmarks[0]
-                    lm_3d = self._extract_landmarks_3d(face_lm)
+                    lm_3d = np.array(
+                        [[p.x, p.y, p.z] for p in face_lm], dtype=np.float32
+                    )
 
-                    # --- Estimate expression ---
+                    # Expression estimation
                     t0 = time.time()
                     self.expression = self.estimate_expression(lm_3d)
                     expr_time = (time.time() - t0) * 1000
 
-                    # --- Generate GNM mesh ---
+                    # GNM forward pass
                     t0 = time.time()
                     vertices = self.generate_mesh()
                     mesh_time = (time.time() - t0) * 1000
 
-                    # --- Left panel: webcam with landmark dots ---
+                    # Left: webcam + landmark dots
                     display_left = frame.copy()
-                    self._draw_landmarks(display_left, face_lm)
+                    h, w = frame.shape[:2]
+                    for lm in face_lm:
+                        px, py = int(lm.x * w), int(lm.y * h)
+                        cv2.circle(display_left, (px, py), 1, (0, 220, 0), -1)
 
-                    # --- Right panel: GNM mesh render ---
-                    vn = self.gnm.compute_vertex_normals(vertices)
-                    display_right = renderer.render(
-                        vertices, self.gnm.triangles, vn,
+                    # Right: GNM wireframe
+                    display_right = renderer.render(vertices, self.gnm.triangles)
+
+                    # Expression magnitude indicator
+                    expr_mag = float(np.abs(self.expression).mean())
+                    expr_colour = (
+                        (0, 255, 0) if expr_mag < 0.1
+                        else (0, 255, 255) if expr_mag < 0.3
+                        else (0, 140, 255)
                     )
+                    cv2.putText(display_right, f"Expr: {expr_mag:.3f}",
+                                (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55, expr_colour, 2)
 
                     # HUD
-                    cv2.putText(display_right, "GNM Head",
-                                (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6, (255, 255, 255), 2)
                     cv2.putText(display_left,
-                                f"Expr: {expr_time:.0f}ms  Mesh: {mesh_time:.0f}ms",
+                                f"Expr: {expr_time:.0f}ms | Mesh: {mesh_time:.0f}ms",
                                 (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.45, (0, 220, 0), 1)
 
-                    if self._show_fullscreen_gnm:
-                        display = display_right
-                    else:
-                        display = np.hstack([display_left, display_right])
-
+                    display = (
+                        display_right if self._show_fullscreen_gnm
+                        else np.hstack([display_left, display_right])
+                    )
                 else:
                     display = frame.copy()
-                    cv2.putText(display, "No face detected",
-                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                                1.0, (0, 0, 255), 2)
+                    cv2.putText(display, "No face", (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
-                # FPS counter
+                # FPS
                 t_now = time.time()
                 dt = t_now - t_last
                 t_last = t_now
@@ -787,7 +695,7 @@ class GNMFaceTracker:
                     sum(self._fps_window) / len(self._fps_window), 1e-6
                 )
                 cv2.putText(display, f"FPS: {self._fps:.0f}",
-                            (display.shape[1] - 110, 22),
+                            (display.shape[1] - 100, 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
                 cv2.imshow("GNM Face Tracker", display)
@@ -812,11 +720,35 @@ class GNMFaceTracker:
 
 
 # ---------------------------------------------------------------------------
+# Helpers (module-level)
+# ---------------------------------------------------------------------------
+
+def _procrustes_similarity(
+    source: np.ndarray, target: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Similarity alignment (rotation + translation + uniform scale)."""
+    src_c = source.mean(axis=0)
+    tgt_c = target.mean(axis=0)
+    src_cen = source - src_c
+    tgt_cen = target - tgt_c
+    h = src_cen.T @ tgt_cen
+    u, _, vt = np.linalg.svd(h)
+    r = vt.T @ u.T
+    if np.linalg.det(r) < 0:
+        vt[-1, :] *= -1
+        r = vt.T @ u.T
+    num = np.sum(tgt_cen * (src_cen @ r))
+    den = np.sum(src_cen ** 2)
+    scale = num / max(den, 1e-12)
+    aligned = scale * (source - src_c) @ r + tgt_c
+    return aligned, r, scale
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Run the GNM Face Tracker application."""
     tracker = GNMFaceTracker()
     tracker.run()
 
