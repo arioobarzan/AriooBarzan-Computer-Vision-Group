@@ -249,6 +249,7 @@ class GNMFaceTracker:
         # Stabilise expression with temporal smoothing
         self._expr_smooth: Optional[np.ndarray] = None
         self._expr_alpha = 0.55  # smoothing factor
+        self._expr_gain: float = 5.0  # expression amplification gain
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -545,9 +546,13 @@ class GNMFaceTracker:
                     lm_expr_basis[:, i, :] += w * expr_basis[:, idx, :]
 
         jac = lm_expr_basis.reshape(E_dim, -1).T
-        reg = 0.005
+        # Very weak regularisation — expression changes in GNM space are
+        # tiny (sub-mm), so we need the regressor to be sensitive enough
+        # to amplify them into visible expression parameters.
+        reg = 0.0001
         lhs = jac.T @ jac + reg * np.eye(E_dim)
         self._expr_regressor = np.linalg.solve(lhs, jac.T).astype(np.float32)
+        self._expr_gain = 5.0  # amplify expression for visible mesh deformation
         self._lm_indices_cache = lm_indices
         self._lm_weights_cache = lm_weights
         self._num_cached_lm = num_lm
@@ -590,12 +595,17 @@ class GNMFaceTracker:
                     id_lm_gnm[i] += w * pos
 
         # RIGID alignment (rotation + translation only — NO scale)
-        # This preserves expression changes that would otherwise be absorbed
-        # by scale adjustment
+        # Expression changes are preserved by rigid-only alignment
         user_aligned_gnm, _ = procrustes_rigid(user_68_mp, id_lm_gnm)
 
         residual = user_aligned_gnm - id_lm_gnm
         expr_raw = self._expr_regressor @ residual.ravel().astype(np.float32)
+
+        # Amplify — expression changes in GNM space are sub-mm,
+        # so the raw regressor output needs a gain boost to produce
+        # visible mesh deformation.  Clamp to [-3, 3] (GNM's typical range).
+        expr_raw *= self._expr_gain
+        expr_raw = np.clip(expr_raw, -3.0, 3.0)
 
         # Temporal smoothing to reduce jitter
         if self._expr_smooth is None:
