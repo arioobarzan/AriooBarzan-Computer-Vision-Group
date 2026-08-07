@@ -244,7 +244,6 @@ class GNMFaceTracker:
         self.expression: Optional[np.ndarray] = None
 
         self._gnm68_template: Optional[np.ndarray] = None
-        self._expr_regressor: Optional[np.ndarray] = None
         self._lm_indices_cache: Optional[np.ndarray] = None
         self._lm_weights_cache: Optional[np.ndarray] = None
         self._num_cached_lm: int = 0
@@ -255,10 +254,9 @@ class GNMFaceTracker:
         self._fps_window: list[float] = []
         self._fps = 0.0
 
-        # Expression state
-        self._expr_smooth: Optional[np.ndarray] = None
-        self._expr_alpha = 0.35
-        self._expr_gain: float = 20.0
+        # Mouth state
+        self._jaw_smooth: float = 0.0
+        self._jaw_alpha = 0.25  # fast response for mouth
 
         # Head pose state
         self._head_rvec: np.ndarray = np.zeros(3, dtype=np.float32)
@@ -416,7 +414,7 @@ class GNMFaceTracker:
 
         print("[Identity Fit] Optimising ...")
         self.identity = self._optimise_identity(captured_lm)
-        self._build_expression_regressor()
+        self._cache_landmark_indices()
         return True
 
     def _optimise_identity(self, mp_lm: np.ndarray) -> np.ndarray:
@@ -475,10 +473,11 @@ class GNMFaceTracker:
         return identity.astype(np.float32)
 
     # ------------------------------------------------------------------
-    # Expression regressor
+    # Landmark cache (needed for GNM landmark overlay)
     # ------------------------------------------------------------------
 
-    def _build_expression_regressor(self):
+    def _cache_landmark_indices(self):
+        """Cache GNM landmark indices for drawing overlay."""
         try:
             from gnm.shape.gnm_landmarks import GNMLandmarksType, load_landmarks
             lc = load_landmarks(GNMLandmarksType.HEAD_SPARSE_68)
@@ -488,73 +487,70 @@ class GNMFaceTracker:
             fb = np.array(self._fallback_landmark_vertex_indices or [], dtype=np.int32)
             li = fb.reshape(-1, 1)
             lw = np.ones((len(fb), 1), dtype=np.float64)
-
-        nl = li.shape[0]
-        eb = self.gnm.expression_basis.astype(np.float64)
-        ED = self.gnm.expression_dim
-
-        leb = np.zeros((ED, nl, 3), dtype=np.float64)
-        for i in range(nl):
-            for j in range(li.shape[1]):
-                vi, wi = li[i, j], lw[i, j]
-                if wi > 0 and vi >= 0:
-                    leb[:, i, :] += wi * eb[:, vi, :]
-
-        jac = leb.reshape(ED, -1).T
-        reg = 0.0001
-        lhs = jac.T @ jac + reg * np.eye(ED)
-        self._expr_regressor = np.linalg.solve(lhs, jac.T).astype(np.float32)
-        self._expr_gain = 20.0
         self._lm_indices_cache = li
         self._lm_weights_cache = lw
-        self._num_cached_lm = nl
-        print(f"[GNM] Regressor: {self._expr_regressor.shape}")
+        self._num_cached_lm = li.shape[0]
 
     # ------------------------------------------------------------------
-    # Expression estimation
+    # Expression: mouth-open only
     # ------------------------------------------------------------------
 
-    def estimate_expression(self, mp_lm: np.ndarray) -> np.ndarray:
-        if (self.identity is None or self._expr_regressor is None
-                or self._lm_indices_cache is None):
-            return np.zeros(self.gnm.expression_dim, dtype=np.float32)
+    # MediaPipe lip landmarks
+    _MP_UPPER_LIP = 13   # upper lip top centre
+    _MP_LOWER_LIP = 14   # lower lip bottom centre
+    _MP_LEFT_LIP = 61    # left mouth corner
+    _MP_RIGHT_LIP = 291  # right mouth corner
 
-        u68 = np.zeros((68, 3), dtype=np.float64)
-        for ib, mp_i in IBUG68_TO_MEDIAPIPE.items():
-            if mp_i < len(mp_lm):
-                u68[ib] = mp_lm[mp_i]
+    # GNM expression index for jaw open
+    _GNM_JAW_OPEN = 200  # lower_face_region_000
 
-        tv = self.gnm.template_vertex_positions.astype(np.float64)
-        ib = self.gnm.vertex_identity_basis.astype(np.float64)
-        idv = self.identity.astype(np.float64)
-        nl = self._lm_indices_cache.shape[0]
+    def estimate_expression(self, face_landmarks) -> np.ndarray:
+        """Compute mouth-open expression from MediaPipe lip landmarks.
 
-        i_gnm = np.zeros((nl, 3), dtype=np.float64)
-        for i in range(nl):
-            for j in range(self._lm_indices_cache.shape[1]):
-                vi = self._lm_indices_cache[i, j]
-                wi = self._lm_weights_cache[i, j]
-                if wi > 0 and vi >= 0:
-                    i_gnm[i] += wi * (tv[vi] + np.dot(idv, ib[:, vi, :]))
+        Simply measures the vertical distance between upper and lower lip,
+        normalised by mouth width, and maps it to the GNM jaw-open parameter.
+        """
+        expr = np.zeros(self.gnm.expression_dim, dtype=np.float32)
 
-        # Align on stable landmarks only
-        su = u68[_STABLE_IBUG]
-        si = i_gnm[_STABLE_IBUG]
-        _, rot = procrustes_rigid(su, si)
-        ua = (u68 - u68.mean(axis=0)) @ rot + si.mean(axis=0)
+        if len(face_landmarks) < max(
+                self._MP_UPPER_LIP, self._MP_LOWER_LIP,
+                self._MP_LEFT_LIP, self._MP_RIGHT_LIP
+        ) + 1:
+            return expr
 
-        res = ua - i_gnm
-        ex = self._expr_regressor @ res.ravel().astype(np.float32)
-        ex = np.clip(ex * self._expr_gain, -3.0, 3.0)
+        # Get 3D lip positions (MP normalised coordinates)
+        ul = np.array([face_landmarks[self._MP_UPPER_LIP].x,
+                       face_landmarks[self._MP_UPPER_LIP].y,
+                       face_landmarks[self._MP_UPPER_LIP].z])
+        ll = np.array([face_landmarks[self._MP_LOWER_LIP].x,
+                       face_landmarks[self._MP_LOWER_LIP].y,
+                       face_landmarks[self._MP_LOWER_LIP].z])
+        lc = np.array([face_landmarks[self._MP_LEFT_LIP].x,
+                       face_landmarks[self._MP_LEFT_LIP].y,
+                       face_landmarks[self._MP_LEFT_LIP].z])
+        rc = np.array([face_landmarks[self._MP_RIGHT_LIP].x,
+                       face_landmarks[self._MP_RIGHT_LIP].y,
+                       face_landmarks[self._MP_RIGHT_LIP].z])
 
-        if self._expr_smooth is None:
-            self._expr_smooth = ex.copy()
-        else:
-            self._expr_smooth = (
-                self._expr_alpha * self._expr_smooth
-                + (1 - self._expr_alpha) * ex
-            )
-        return self._expr_smooth.copy()
+        # Mouth openness = vertical lip distance / horizontal mouth width
+        mouth_height = np.linalg.norm(ll - ul)
+        mouth_width = np.linalg.norm(rc - lc)
+        if mouth_width < 1e-6:
+            return expr
+
+        openness = mouth_height / mouth_width
+
+        # Map to GNM jaw parameter: typical range 0.1 (closed) → 0.7+ (wide open)
+        # openness ≈ 0.05-0.15 (closed) → 0.4-0.8 (open)
+        jaw_value = (openness - 0.05) / 0.35  # normalise
+        jaw_value = np.clip(jaw_value, 0.0, 1.0) * 3.0  # scale to GNM range
+
+        # Smooth
+        self._jaw_smooth = (self._jaw_alpha * self._jaw_smooth
+                            + (1 - self._jaw_alpha) * jaw_value)
+
+        expr[self._GNM_JAW_OPEN] = self._jaw_smooth
+        return expr
 
     # ------------------------------------------------------------------
     # Head pose extraction from MediaPipe transform matrix
@@ -652,13 +648,13 @@ class GNMFaceTracker:
         if not self._auto_fit_identity():
             print("[WARNING] Using template identity.")
             self.identity = np.zeros(self.gnm.identity_dim, dtype=np.float32)
-            self._build_expression_regressor()
+            self._cache_landmark_indices()
 
         self.expression = np.zeros(self.gnm.expression_dim, dtype=np.float32)
-        self._expr_smooth = None
+        self._jaw_smooth = 0.0
 
         print("\n" + "=" * 60)
-        print("  Real-time Tracking -- head pose + expression synced")
+        print("  Real-time Tracking -- head pose + mouth synced")
         print("=" * 60)
         print("  q=quit | r=re-fit | f=fullscreen\n")
 
@@ -689,9 +685,9 @@ class GNMFaceTracker:
                             result.facial_transformation_matrixes[0]
                         )
 
-                    # --- Expression ---
+                    # --- Expression (mouth only) ---
                     t0 = time.time()
-                    self.expression = self.estimate_expression(lm_3d)
+                    self.expression = self.estimate_expression(face_lm)
                     expr_ms = (time.time() - t0) * 1000
 
                     # --- GNM mesh ---
@@ -716,12 +712,12 @@ class GNMFaceTracker:
                     gnm_lm = self._compute_gnm_lm_positions(verts)
                     self._draw_gnm_lm(right, gnm_lm, self._head_rvec, renderer)
 
-                    # Expression bar
-                    em = float(np.abs(self.expression).mean())
-                    bw = int(np.clip(em * 200, 0, 200))
+                    # Jaw-open bar
+                    jaw = self._jaw_smooth
+                    bw = int(np.clip(jaw / 3.0 * 200, 0, 200))
                     cv2.rectangle(right, (10, 30), (10 + bw, 42),
                                   (0, 200, 100), -1)
-                    cv2.putText(right, f"Expr: {em:.3f}",
+                    cv2.putText(right, f"Jaw: {jaw:.2f}",
                                 (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.45, (200, 200, 200), 1)
 
