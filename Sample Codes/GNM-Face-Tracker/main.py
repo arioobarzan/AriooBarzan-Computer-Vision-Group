@@ -54,6 +54,14 @@ NUM_MP_LANDMARKS = 478
 # ---------------------------------------------------------------------------
 # MediaPipe → iBUG 68 mapping
 # ---------------------------------------------------------------------------
+# Stable landmarks for Procrustes alignment — rigid facial structure that
+# doesn't deform with expression (jawline, nose bridge, outer eye corners).
+_STABLE_IBUG = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,  # jawline
+    27, 28, 29, 30,                                                # nose bridge
+    36, 39, 42, 45,                                                # outer eye corners
+]
+
 IBUG68_TO_MEDIAPIPE: dict[int, int] = {
     0: 234, 1: 93, 2: 132, 3: 58, 4: 172, 5: 136, 6: 150,
     7: 176, 8: 148, 9: 152, 10: 377, 11: 400, 12: 378, 13: 379,
@@ -254,7 +262,7 @@ class GNMFaceTracker:
 
         # Stabilise expression with temporal smoothing
         self._expr_smooth: Optional[np.ndarray] = None
-        self._expr_alpha = 0.55  # smoothing factor
+        self._expr_alpha = 0.35  # smoothing factor (lower = faster response)
         self._expr_gain: float = 20.0  # expression amplification gain
 
     # ------------------------------------------------------------------
@@ -571,19 +579,22 @@ class GNMFaceTracker:
     def estimate_expression(self, mp_landmarks_3d: np.ndarray) -> np.ndarray:
         """Estimate expression from MP landmarks.
 
-        Uses rigid-only Procrustes (no scale) to preserve expression
-        changes.  The MP→GNM scale is already baked into the regressor.
+        Uses STABLE landmarks (jawline, nose bridge, outer eye corners)
+        for Procrustes alignment — this prevents expression-driven
+        landmark movement from being absorbed by the alignment transform.
+        The full 68-landmark residual then drives expression parameters.
         """
         if (self.identity is None or self._expr_regressor is None
                 or self._lm_indices_cache is None):
             return np.zeros(self.gnm.expression_dim, dtype=np.float32)
 
+        # Gather user 68 landmarks in MP space
         user_68_mp = np.zeros((68, 3), dtype=np.float64)
         for ibug_idx, mp_idx in IBUG68_TO_MEDIAPIPE.items():
             if mp_idx < len(mp_landmarks_3d):
                 user_68_mp[ibug_idx] = mp_landmarks_3d[mp_idx]
 
-        # Compute identity landmarks in GNM space
+        # Identity landmarks in GNM space (all 68)
         template_v = self.gnm.template_vertex_positions.astype(np.float64)
         id_basis = self.gnm.vertex_identity_basis.astype(np.float64)
         identity_d = self.identity.astype(np.float64)
@@ -600,20 +611,28 @@ class GNMFaceTracker:
                     )
                     id_lm_gnm[i] += w * pos
 
-        # RIGID alignment (rotation + translation only — NO scale)
-        # Expression changes are preserved by rigid-only alignment
-        user_aligned_gnm, _ = procrustes_rigid(user_68_mp, id_lm_gnm)
+        # --- Align using ONLY stable landmarks ---
+        # Stable = rigid facial structure (jaw, nose bridge, outer eye corners).
+        # This prevents mouth/eyebrow expression from being absorbed by the
+        # alignment transform.
+        stable_user = user_68_mp[_STABLE_IBUG]
+        stable_gnm = id_lm_gnm[_STABLE_IBUG]
+        _, rot = procrustes_rigid(stable_user, stable_gnm)
 
-        residual = user_aligned_gnm - id_lm_gnm
+        # Apply the SAME rotation to ALL 68 user landmarks
+        user_c = user_68_mp.mean(axis=0)
+        gnm_c = stable_gnm.mean(axis=0)
+        user_aligned = (user_68_mp - user_c) @ rot + gnm_c
+
+        # Residual on all 68 landmarks
+        residual = user_aligned - id_lm_gnm
         expr_raw = self._expr_regressor @ residual.ravel().astype(np.float32)
 
-        # Amplify — expression changes in GNM space are sub-mm,
-        # so the raw regressor output needs a gain boost to produce
-        # visible mesh deformation.  Clamp to [-3, 3] (GNM's typical range).
+        # Amplify for visible deformation; clamp to GNM typical range
         expr_raw *= self._expr_gain
         expr_raw = np.clip(expr_raw, -3.0, 3.0)
 
-        # Temporal smoothing to reduce jitter
+        # Temporal smoothing
         if self._expr_smooth is None:
             self._expr_smooth = expr_raw.copy()
         else:
