@@ -153,15 +153,18 @@ class FastMeshRenderer:
         if rvec is None:
             rvec = np.zeros(3, dtype=np.float32)
         if tvec is None:
-            tvec = np.array([0.0, 0.05, 1.8], dtype=np.float32)
+            # GNM face points +Z.  Camera at positive Z looking towards origin.
+            # Negative tvec[2] brings camera in front of face (Z convention flip).
+            tvec = np.array([0.0, 0.05, -1.8], dtype=np.float32)
 
         rotmat, _ = cv2.Rodrigues(rvec)
         cam = vertices @ rotmat.T + tvec.reshape(1, 3)
         fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
-        z = cam[:, 2]
+        # NEGATE Z — camera looks along -Z in GNM world (face at origin, camera in front)
+        # NEGATE Y — GNM has Y-up, OpenCV image has Y-down
+        z = -cam[:, 2]
         z_safe = np.where(np.abs(z) < 1e-6, np.copysign(1e-6, z), z)
         u = fx * cam[:, 0] / z_safe + cx
-        # NEGATE Y — GNM has Y-up, OpenCV image has Y-down
         v = fy * (-cam[:, 1]) / z_safe + cy
 
         # --- Face normals (GNM space) ---
@@ -673,6 +676,71 @@ class GNMFaceTracker:
         )
 
     # ------------------------------------------------------------------
+    # Landmark helpers
+    # ------------------------------------------------------------------
+
+    def _compute_gnm_landmark_positions(
+        self, vertices: np.ndarray
+    ) -> np.ndarray:
+        """Compute the 3D position of each GNM 68 landmark on the deformed mesh.
+
+        Uses the cached landmark indices and barycentric weights.
+        """
+        num_lm = self._lm_indices_cache.shape[0]
+        positions = np.zeros((num_lm, 3), dtype=np.float32)
+        for i in range(num_lm):
+            for j in range(self._lm_indices_cache.shape[1]):
+                idx = self._lm_indices_cache[i, j]
+                w = self._lm_weights_cache[i, j]
+                if w > 0 and idx >= 0:
+                    positions[i] += w * vertices[idx]
+        return positions
+
+    @staticmethod
+    def _draw_gnm_landmarks(
+        img: np.ndarray,
+        lm_3d: np.ndarray,
+        rvec: np.ndarray,
+        renderer,
+    ) -> None:
+        """Draw the 68 GNM landmarks as coloured dots on the rendered image.
+
+        Colour key:
+          - Green: jawline (0-16)
+          - Yellow: eyebrows (17-26)
+          - Cyan: nose (27-35)
+          - Magenta: eyes (36-47)
+          - Orange: mouth (48-67)
+        """
+        rotmat, _ = cv2.Rodrigues(rvec)
+        tvec = np.array([0.0, 0.05, -1.8], dtype=np.float32)
+        cam = lm_3d @ rotmat.T + tvec.reshape(1, 3)
+        fx, fy = renderer.K[0, 0], renderer.K[1, 1]
+        cx, cy = renderer.K[0, 2], renderer.K[1, 2]
+        z = -cam[:, 2]
+        z_safe = np.where(np.abs(z) < 1e-6, np.copysign(1e-6, z), z)
+        u = fx * cam[:, 0] / z_safe + cx
+        v = fy * (-cam[:, 1]) / z_safe + cy
+
+        # Region colours (BGR)
+        regions = [
+            (0, 16, (0, 255, 80)),     # jawline: green
+            (17, 26, (0, 230, 230)),   # eyebrows: yellow
+            (27, 35, (230, 230, 0)),   # nose: cyan
+            (36, 47, (230, 0, 230)),   # eyes: magenta
+            (48, 67, (0, 140, 255)),   # mouth: orange
+        ]
+        for start, end, colour in regions:
+            pts = np.stack([u[start:end+1], v[start:end+1]], axis=1)
+            pts = pts.astype(np.int32)
+            for pt in pts:
+                if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
+                    cv2.circle(img, tuple(pt), 2, colour, -1)
+            # Draw connecting lines
+            if len(pts) > 1:
+                cv2.polylines(img, [pts], True, colour, 1)
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -736,11 +804,17 @@ class GNMFaceTracker:
                         cv2.circle(display_left, (px, py), 1, (0, 220, 0), -1)
 
                     # Right: GNM mesh with slight Y-rotation for 3D depth
-                    # A slow auto-rotation lets the user see the 3D structure
                     angle = np.sin(time.time() * 0.3) * 0.35  # gentle sway
                     rvec_3d = np.array([0.0, angle, 0.0], dtype=np.float32)
                     display_right = renderer.render(
                         vertices, self._skin_triangles, rvec=rvec_3d,
+                    )
+
+                    # --- Draw GNM 68 landmarks on the rendered mesh ---
+                    # Compute current landmark positions on the deformed GNM mesh
+                    gnm_lm_3d = self._compute_gnm_landmark_positions(vertices)
+                    self._draw_gnm_landmarks(
+                        display_right, gnm_lm_3d, rvec_3d, renderer,
                     )
 
                     # Expression magnitude HUD — show as a bar
