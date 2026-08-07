@@ -578,7 +578,12 @@ class GNMFaceTracker:
         r_gnm = flip_y @ r_mp @ flip_y
 
         rvec, _ = cv2.Rodrigues(r_gnm)
-        return rvec.ravel().astype(np.float32)
+        rvec = rvec.ravel().astype(np.float32)
+        # Pitch correction: MediaPipe Y-down → GNM Y-up inverts the pitch
+        # direction.  Negate the X (pitch) component so tilting head up
+        # makes the avatar look up, not down.
+        rvec[0] *= -1.0
+        return rvec
 
     # ------------------------------------------------------------------
     # GNM forward pass
