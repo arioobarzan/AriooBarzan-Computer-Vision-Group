@@ -171,13 +171,19 @@ class FastMeshRenderer:
         front_facing = fn_cam[:, 2] < 0
 
         # --- Shading ---
-        light_dir = np.array([0.15, 0.25, 1.0])  # camera-space light
-        light_dir = light_dir / np.linalg.norm(light_dir)
-        lambert = np.clip(np.sum(fn_cam * light_dir, axis=1), 0.0, 1.0)
-        ambient = 0.25
-        shade = ambient + (1.0 - ambient) * lambert
+        # Key light from upper-right-front, fill light from lower-left
+        key_light = np.array([0.4, -0.3, 1.0])
+        key_light = key_light / np.linalg.norm(key_light)
+        fill_light = np.array([-0.3, 0.5, 0.7])
+        fill_light = fill_light / np.linalg.norm(fill_light)
 
-        # Base skin colour BGR
+        key_lambert = np.clip(np.sum(fn_cam * key_light, axis=1), 0.0, 1.0)
+        fill_lambert = np.clip(np.sum(fn_cam * fill_light, axis=1), 0.0, 1.0)
+
+        ambient = 0.12
+        shade = ambient + 0.65 * key_lambert + 0.23 * fill_lambert
+
+        # Base skin tone BGR
         base = np.array([185, 145, 115], dtype=np.float32)
         colours = np.clip(base * shade[:, None], 0, 255).astype(np.uint8)
         # Convert each triangle's colour to a single integer key for binning
@@ -249,7 +255,7 @@ class GNMFaceTracker:
         # Stabilise expression with temporal smoothing
         self._expr_smooth: Optional[np.ndarray] = None
         self._expr_alpha = 0.55  # smoothing factor
-        self._expr_gain: float = 5.0  # expression amplification gain
+        self._expr_gain: float = 20.0  # expression amplification gain
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -552,7 +558,7 @@ class GNMFaceTracker:
         reg = 0.0001
         lhs = jac.T @ jac + reg * np.eye(E_dim)
         self._expr_regressor = np.linalg.solve(lhs, jac.T).astype(np.float32)
-        self._expr_gain = 5.0  # amplify expression for visible mesh deformation
+        self._expr_gain = 20.0  # amplify expression for visible mesh deformation
         self._lm_indices_cache = lm_indices
         self._lm_weights_cache = lm_weights
         self._num_cached_lm = num_lm
@@ -710,21 +716,24 @@ class GNMFaceTracker:
                         px, py = int(lm.x * w), int(lm.y * h)
                         cv2.circle(display_left, (px, py), 1, (0, 220, 0), -1)
 
-                    # Right: GNM flat-shaded mesh (skin exterior only)
+                    # Right: GNM mesh with slight Y-rotation for 3D depth
+                    # A slow auto-rotation lets the user see the 3D structure
+                    angle = np.sin(time.time() * 0.3) * 0.35  # gentle sway
+                    rvec_3d = np.array([0.0, angle, 0.0], dtype=np.float32)
                     display_right = renderer.render(
-                        vertices, self._skin_triangles
+                        vertices, self._skin_triangles, rvec=rvec_3d,
                     )
 
-                    # Expression magnitude indicator
+                    # Expression magnitude HUD — show as a bar
                     expr_mag = float(np.abs(self.expression).mean())
-                    expr_colour = (
-                        (0, 255, 0) if expr_mag < 0.1
-                        else (0, 255, 255) if expr_mag < 0.3
-                        else (0, 140, 255)
-                    )
-                    cv2.putText(display_right, f"Expr: {expr_mag:.3f}",
-                                (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55, expr_colour, 2)
+                    expr_max = float(np.abs(self.expression).max())
+                    bar_w = int(np.clip(expr_mag * 200, 0, 200))
+                    cv2.rectangle(display_right, (10, 30), (10 + bar_w, 42),
+                                  (0, 200, 100), -1)
+                    cv2.putText(display_right,
+                                f"Expr: {expr_mag:.3f}  max:{expr_max:.2f}",
+                                (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45, (200, 200, 200), 1)
 
                     # HUD
                     cv2.putText(display_left,
