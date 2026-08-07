@@ -19,7 +19,8 @@
 │   ├── Blink-Counter/         #   Count eye blinks using EAR (Eye Aspect Ratio) + Face Mesh
 │   ├── Rock-Paper-Scissors-AI/  #   Play Rock-Paper-Scissors against the computer with hand gestures
 │   ├── Jedi-Force-Push/     #   Thrust your palm toward the camera to unleash a shockwave
-│   └── PES13-AI-Penalty-Kicker/  #   Control PES 2013 penalty shootouts with hand gestures
+│   ├── PES13-AI-Penalty-Kicker/  #   Control PES 2013 penalty shootouts with hand gestures
+│   └── GNM-Face-Tracker/       #   Real-time 3D face tracking with Google's GNM parametric head model
 ├── Articles/                  # (coming) Blog posts, tutorials, and write-ups
 ├── Books/                     # Reference books on CV, image processing, and graphics
 ├── Papers/                    # (coming) Paper reviews and implementations
@@ -43,6 +44,7 @@ Each project in `Sample Codes/` is self-contained with its own `README.md`, `req
 | [**Rock-Paper-Scissors AI**](Sample%20Codes/Rock-Paper-Scissors-AI/) | Play Rock-Paper-Scissors against the computer using hand gestures. Auto countdown, scoreboard, and real-time result. | MediaPipe Hands, OpenCV |
 | [**Jedi Force Push**](Sample%20Codes/Jedi-Force-Push/) | Thrust your palm toward the camera to trigger shockwave rings, sparks, and screen shake. | MediaPipe Hands, OpenCV |
 | [**PES13 AI Penalty Kicker**](Sample%20Codes/PES13-AI-Penalty-Kicker/) | Control PES 2013 penalty shootouts with hand gestures. Aim by zone, fist to power, open palm to shoot. | MediaPipe Hands, OpenCV, Win32 |
+| [**GNM Face Tracker**](Sample%20Codes/GNM-Face-Tracker/) | Real-time 3D face tracking using Google's GNM parametric head model. Identity fitting + expression tracking with 17,821-vertex mesh. | MediaPipe Face Mesh, GNM, SciPy, OpenCV |
 
 ### Shared Utilities (`Sample Codes/common/`)
 
